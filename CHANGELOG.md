@@ -6,6 +6,14 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-19
+
+### Fixed
+
+- `mock_spy` keeps the `function` keyword when it hides a definition written as
+  `function name`. Such a function could not be spied on: the hidden copy did not
+  compile and `mock_spy` returned 1.
+
 ## [1.0.0] - 2026-09-19
 
 First tagged release.
@@ -49,5 +57,6 @@ Compatibility changes for users of earlier untagged revisions:
 - Lock timeouts account for command execution and scheduling overhead, including on macOS;
   stdin-log timeouts remove the temporary capture file.
 
-[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.0.0...main
+[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.0.1...main
+[1.0.1]: https://github.com/stealth-scale/bats-mock/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/stealth-scale/bats-mock/releases/tag/v1.0.0
