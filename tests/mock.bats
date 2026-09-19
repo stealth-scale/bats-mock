@@ -72,6 +72,8 @@ run_with_timeout() {
             kill -KILL -- "-$task_pid" 2>/dev/null
         ) &
         timer_pid=$!
+        # Disowned, so bash does not report "Killed" for it when it is stopped below.
+        disown "$timer_pid"
         set +m
         result=0
         wait "$task_pid" 2>/dev/null || result=$?
