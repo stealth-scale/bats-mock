@@ -34,7 +34,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: make lint
 
-  # The bash and bats matrix, in the test image, as `make test` runs it locally.
+  # The bash and bats matrix, in the bats-test image, as `make test` runs it locally.
   test:
     name: test (bash ${{ matrix.bash }}, bats ${{ matrix.bats }})
     strategy:
@@ -74,3 +74,17 @@ jobs:
       # The runner starts steps with SIGPIPE ignored, which changes how a producer such
       # as `yes` ends. Restore the default so the tests see a normal shell.
       - run: perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV' make test-host
+
+  # Line coverage from kcov, on the default cell. The report is an artifact.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: make coverage RUNTIME=docker
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage
+          if-no-files-found: ignore
