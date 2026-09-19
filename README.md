@@ -146,11 +146,14 @@ directory and unsets the rule variables the framework exported.
 ## Working here
 
 ```sh
-make check      # shellcheck, then the test suite
-make test       # the suite alone; BATS_FLAGS and BATS override the defaults
-make lint       # shellcheck over the loader, the sources, the tests and the scripts
-make coverage   # line coverage of src/ under the suite
+make test                                   # the suite in the test image: bash 5.2, bats 1.14.0
+make test BASH_VERSION=4.4 BATS_VERSION=1.7.0
+make test-host                              # the suite with the bash and bats of this machine
+make lint                                   # shellcheck over the loader, the sources and the tests
+make check                                  # what CI runs: lint, then test
 ```
+
+`RUNTIME=docker` selects Docker. The default is Podman. `TARGET` selects one test file.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
 

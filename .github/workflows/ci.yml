@@ -13,6 +13,10 @@ concurrency:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 env:
   SHELLCHECK_VERSION: v0.11.0
 
@@ -28,10 +32,25 @@ jobs:
           curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
             | tar -xJ --strip-components 1 -C "$HOME/.local/bin" "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/shellcheck" --version
       - run: make lint
 
+  # The bash and bats matrix, in the test image, as `make test` runs it locally.
   test:
+    name: test (bash ${{ matrix.bash }}, bats ${{ matrix.bats }})
+    strategy:
+      fail-fast: false
+      matrix:
+        bash: ["4.4", "5.1", "5.2", "5.3"]
+        bats: ["1.7.0", "1.14.0"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: make test RUNTIME=docker BASH_VERSION=${{ matrix.bash }} BATS_VERSION=${{ matrix.bats }}
+
+  # The bash and bats of a developer machine, Linux and macOS.
+  test-host:
+    name: test-host (${{ matrix.os }}, bats ${{ matrix.bats }})
     strategy:
       fail-fast: false
       matrix:
@@ -48,9 +67,8 @@ jobs:
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
       - name: Install bats-core ${{ matrix.bats }}
         run: |
-          git clone --quiet --depth 1 --branch "v${{ matrix.bats }}" https://github.com/bats-core/bats-core.git /tmp/bats-core
-          /tmp/bats-core/install.sh "$HOME/.local"
+          git clone --quiet --depth 1 --branch "v${{ matrix.bats }}" https://github.com/bats-core/bats-core.git /tmp/bats
+          /tmp/bats/install.sh "$HOME/.local"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: bash --version | head -1 && bats --version
-      - run: make test
-
+      - run: make test-host

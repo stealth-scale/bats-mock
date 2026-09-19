@@ -2,13 +2,10 @@
 
 ## Getting set up
 
-You need Bash 4 or later, [bats-core](https://github.com/bats-core/bats-core) 1.7.0 or
-later, [ShellCheck](https://www.shellcheck.net) and GNU make.
-
-```sh
-sudo dnf install bats ShellCheck make      # Fedora
-brew install bats-core shellcheck          # macOS, with Homebrew's bash on PATH
-```
+You need GNU make, [ShellCheck](https://www.shellcheck.net) and Podman or Docker.
+`make test` builds a small image from `tests/Containerfile` with the bash and bats-core
+versions it is given. For `make test-host`, install Bash 4 or later and
+[bats-core](https://github.com/bats-core/bats-core) 1.7.0 or later.
 
 ```sh
 git clone git@github.com:stealth-scale/bats-mock.git
@@ -19,20 +16,22 @@ make check
 ## Before you open a pull request
 
 ```sh
-make lint       # shellcheck over the loader, the sources, the tests and the scripts
-make test       # the test suite
-make coverage   # line coverage of src/, reported without a floor
+make lint       # shellcheck over the loader, the sources and the tests
+make test       # the suite in the test image; BASH_VERSION and BATS_VERSION pick the cell
+make test-host  # the suite with the bash and bats of this machine
 make check      # what CI runs: lint, then test
 ```
 
-CI runs `make check` on Ubuntu and macOS, against bats-core 1.7.0 and the latest release.
+`RUNTIME=docker` selects Docker. The default is Podman. `TARGET` selects one test file.
+
+CI runs `make lint`, `make test` for bash 4.4, 5.1, 5.2 and 5.3 against bats-core 1.7.0 and
+1.14.0, and `make test-host` on Ubuntu and macOS with both bats-core versions.
 
 ## A change to the framework
 
 - Put the test in the group of `tests/mock.bats` it belongs to, and name it in the form the
   group uses: `area: case -> expectation`.
-- A behaviour a user can observe has a test. `make coverage` reports the lines the suite
-  never reached. Code the framework generates with `eval` is not measured.
+- A behaviour a user can observe has a test.
 - Add a line under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for a change a user
   would notice.
 

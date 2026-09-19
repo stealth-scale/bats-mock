@@ -1,6 +1,7 @@
-# Publishes a GitHub release for a version tag, with the matching CHANGELOG.md entry as
-# its notes. The tag is pushed by hand after the changelog entry is on main; see
-# CONTRIBUTING.md. A tag without an entry fails here rather than releasing without notes.
+# Publishes a GitHub release for a version tag, with the matching CHANGELOG.md entry
+# as its notes, after the ci workflow has passed on the tag. The tag is pushed by
+# hand after the changelog entry is on main; see CONTRIBUTING.md. A tag without an
+# entry fails here rather than releasing without notes.
 name: release
 
 on:
@@ -11,17 +12,17 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Install bats-core
-        run: |
-          git clone --quiet --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          /tmp/bats-core/install.sh "$HOME/.local"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: make check
       - name: Extract the changelog entry
         run: |
           version="${GITHUB_REF_NAME#v}"
