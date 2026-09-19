@@ -15,7 +15,7 @@ BATS_VERSION ?= 1.14.0
 IMAGE        ?= ghcr.io/stealth-scale/bats-test:bash$(BASH_VERSION)-bats$(BATS_VERSION)
 TARGET       ?= tests/
 BATS_FLAGS   ?= --print-output-on-failure
-COVERAGE_MIN ?= 0
+COVERAGE_MIN ?= 100
 PREFIX       ?= /usr/local
 LIBDIR        = $(PREFIX)/lib/bats-mock
 
@@ -37,7 +37,7 @@ help: ## List the targets
 test: ## Run TARGET in the image
 	$(RUN) $(IMAGE) test $(BATS_FLAGS) --recursive $(TARGET)
 
-coverage: ## Run TARGET under kcov; table per file, report in coverage/, floor COVERAGE_MIN
+coverage: ## Run TARGET under kcov; table per file, report in coverage/, fails under COVERAGE_MIN%
 	rm -rf coverage && mkdir coverage
 	$(RUN) --volume "$(CURDIR)/coverage:/code/coverage" $(IMAGE) coverage --min $(COVERAGE_MIN) $(COVERAGE_FLAGS) -- $(BATS_FLAGS) --recursive $(TARGET)
 

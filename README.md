@@ -414,7 +414,7 @@ command or argument names. Use the new `*_with_args` assertions for argument bou
 make test                                   # the suite in the bats-test image: bash 5.2, bats 1.14.0
 make test BASH_VERSION=4.4 BATS_VERSION=1.7.0
 make test-host                              # the suite with the bash and bats of this machine
-make coverage                               # the suite under kcov: a table per file, report in coverage/
+make coverage                               # the suite under kcov: a table per file, report in coverage/; fails under 100%
 make lint                                   # shellcheck over the loader, the sources and the tests
 make check                                  # what CI runs: lint, then test
 ```

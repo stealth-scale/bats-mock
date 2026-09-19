@@ -20,7 +20,7 @@ make check
 make lint       # shellcheck over the loader, the sources and the tests
 make test       # the suite in the bats-test image; BASH_VERSION and BATS_VERSION pick the cell
 make test-host  # the suite with the bash and bats of this machine
-make coverage   # the suite under kcov: a table per file, report in coverage/
+make coverage   # the suite under kcov: a table per file, report in coverage/; every line must be covered
 make check      # what CI runs: lint, then test
 ```
 
