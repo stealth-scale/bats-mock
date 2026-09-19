@@ -49,7 +49,8 @@ fi
 
 #######################################
 # Acquires an atomic lock for a specific directory.
-# Uses mkdir atomicity to prevent race conditions.
+# Uses mkdir atomicity to prevent race conditions. The five-second deadline
+# includes command execution and scheduling time, not just time spent sleeping.
 #
 # Arguments:
 #    $1 (String) - _lock_dir_path: The directory path to lock (suffix .lock will be appended).
@@ -59,15 +60,14 @@ fi
 #######################################
 mock::sync::lock() {
     local _lock_dir_path="$1.lock"
-    local _lock_timeout=50 # 5 seconds (50 * 0.1)
-    local _lock_i=0
+    local _lock_deadline=$((SECONDS + 5))
 
-    while ! mkdir "$_lock_dir_path" 2>/dev/null; do
-        if (( _lock_i++ >= _lock_timeout )); then
+    while ! command mkdir -- "$_lock_dir_path" 2>/dev/null; do
+        if (( SECONDS >= _lock_deadline )); then
             echo "MOCK TIMEOUT: Could not acquire lock for $1" >&2
             return 1
         fi
-        sleep 0.1
+        command sleep 0.1
     done
     return 0
 }
@@ -391,13 +391,12 @@ mock::jit::compile() {
         # Reserve a per-command index and publish invocation order under one lock.
         # Release it before running user code, including nested mocks.
         local _mock_history_lock=\"\$_mock_state_dir/history.lock\"
-        local _mock_history_attempts=0
+        local _mock_history_deadline=\$((SECONDS + 5))
         while ! command mkdir -- \"\$_mock_history_lock\" 2>/dev/null; do
-            if (( _mock_history_attempts >= 50 )); then
+            if (( SECONDS >= _mock_history_deadline )); then
                 builtin printf 'MOCK TIMEOUT: Could not acquire call history lock\\n' >&2
                 return 1
             fi
-            ((_mock_history_attempts+=1))
             command sleep 0.1
         done
         local _mock_call_index
@@ -499,14 +498,13 @@ mock::jit::compile() {
         # Serialize complete records, including large records that require more
         # than one write. A stale lock must fail instead of hanging the caller.
         local stdin_lock=\"\$_mock_state_dir/${_jit_cmd}.stdin.log.lock\"
-        local lock_attempts=0
+        local _mock_stdin_deadline=\$((SECONDS + 5))
         while ! command mkdir -- \"\$stdin_lock\" 2>/dev/null; do
-             if (( lock_attempts >= 50 )); then
+             if (( SECONDS >= _mock_stdin_deadline )); then
                  builtin printf 'MOCK TIMEOUT: Could not acquire stdin log lock for %s\\n' \"\$cmd_name\" >&2
                  [[ -z \"\${stdin_tmp:-}\" ]] || command rm -f -- \"\$stdin_tmp\"
                  return 1
              fi
-             ((lock_attempts+=1))
              command sleep 0.1
         done
 
@@ -842,9 +840,9 @@ mock_sequence() {
     local idx=0
 
     # 1. Acquire Lock
-    local i=0
+    local _mock_sequence_deadline=\$((SECONDS + 5))
     while ! command mkdir -- \"\$lock_dir\" 2>/dev/null; do
-        if (( i++ > 50 )); then echo 'Lock timeout' >&2; return 1; fi
+        if (( SECONDS >= _mock_sequence_deadline )); then echo 'Lock timeout' >&2; return 1; fi
         command sleep 0.1
     done
 

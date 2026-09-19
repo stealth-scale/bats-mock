@@ -84,6 +84,25 @@ run_with_timeout() {
     ' _ "$seconds" "$@"
 }
 
+# Reproduce slow process/filesystem operations without changing the watchdog's
+# sleep. Fifty retries now take at least 20 seconds; a five-second deadline must
+# still expire within the 15-second safety watchdog.
+slow_lock_attempts() {
+    local lock_path="$1"
+    local shim_dir="$BATS_TEST_TMPDIR/slow-lock-bin"
+    local mkdir_bin
+    mkdir_bin=$(type -P mkdir)
+    mkdir -p "$shim_dir"
+    {
+        printf '#!/usr/bin/env bash\n'
+        # shellcheck disable=SC2016  # expanded when the shim runs
+        printf 'if [[ ${@: -1} == %q ]]; then command sleep 0.3; fi\n' "$lock_path"
+        printf 'exec %q "$@"\n' "$mkdir_bin"
+    } > "$shim_dir/mkdir"
+    chmod +x "$shim_dir/mkdir"
+    export PATH="$shim_dir:$PATH"
+}
+
 # ==============================================================================
 # GROUP 01: CORE MOCK LIFECYCLE
 # ==============================================================================
@@ -1362,24 +1381,76 @@ run_with_timeout() {
     local counter_file="${counter_files[0]}"
 
     mkdir "${counter_file}.lock"
+    slow_lock_attempts "${counter_file}.lock"
 
-    run locked_cmd
+    run_with_timeout 15 locked_cmd
 
     [ "$status" -eq 1 ]
     [[ "$output" == *"Lock timeout"* ]]
+    [ "$(< "$counter_file")" = 0 ]
+    [ -d "${counter_file}.lock" ]
 
     rmdir "${counter_file}.lock"
+    run locked_cmd
+    [ "$status" -eq 0 ]
+    [ "$output" = A ]
 }
 
 @test "error: history lock -> times out before executing an action" {
     mock probe '*' 'echo should-not-run'
     mkdir "$BATS_MOCK_STATE_DIR/history.lock"
-    run_with_timeout 8 probe
+    slow_lock_attempts "$BATS_MOCK_STATE_DIR/history.lock"
+    run_with_timeout 15 probe
     [ "$status" -eq 1 ]
     [[ "$output" == *'call history lock'* ]]
     [[ "$output" != *should-not-run* ]]
     assert_called_times probe 0
+    [ -d "$BATS_MOCK_STATE_DIR/history.lock" ]
     rmdir "$BATS_MOCK_STATE_DIR/history.lock"
+    run probe
+    [ "$status" -eq 0 ]
+    [ "$output" = should-not-run ]
+    assert_called_times probe 1
+}
+
+@test "error: sync lock -> timeout includes slow lock attempts" {
+    local lock_path="$BATS_MOCK_STATE_DIR/manual"
+    mkdir "$lock_path.lock"
+    slow_lock_attempts "$lock_path.lock"
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 15 bash -c '
+        source "$1"
+        mock::sync::lock "$2"
+    ' _ "$BATS_TEST_DIRNAME/../load.bash" "$lock_path"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'MOCK TIMEOUT: Could not acquire lock'* ]]
+    [ -d "$lock_path.lock" ]
+    rmdir "$lock_path.lock"
+    mock::sync::lock "$lock_path"
+    [ -d "$lock_path.lock" ]
+    mock::internal::unlock "$lock_path"
+    [ ! -d "$lock_path.lock" ]
+}
+
+@test "error: history lock -> retries until a competing caller releases it" {
+    mock probe '*' 'echo acquired'
+    mkdir "$BATS_MOCK_STATE_DIR/history.lock"
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 15 bash -c '
+        (
+            sleep 0.5
+            rmdir "$BATS_MOCK_STATE_DIR/history.lock"
+        ) &
+        release_pid=$!
+        result=0
+        probe || result=$?
+        wait "$release_pid" || exit
+        exit "$result"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = acquired ]
+    assert_called_times probe 1
+    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
 }
 
 @test "error: call counter -> rejects malformed state and releases the history lock" {
@@ -2034,12 +2105,17 @@ run_with_timeout() {
 @test "spy: log lock -> times out and removes the capture file" {
     mock_spy head
     mkdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
-    run_with_timeout 10 bash -c 'head -n 1 </dev/null'
+    slow_lock_attempts "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+    run_with_timeout 15 bash -c 'head -n 1 </dev/null'
     [ "$status" -eq 1 ]
     [[ "$output" == *"MOCK TIMEOUT"* ]]
     local leftovers=( "$BATS_MOCK_STATE_DIR"/*.stdin.tmp.* )
     [ ! -e "${leftovers[0]}" ]
+    [ -d "$BATS_MOCK_STATE_DIR/head.stdin.log.lock" ]
     rmdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+    run head -n 1 </dev/null
+    [ "$status" -eq 0 ]
+    assert_called_times head 2
 }
 
 @test "spy: cleanup -> does not terminate children started by the action" {
