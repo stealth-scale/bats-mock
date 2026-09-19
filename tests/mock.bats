@@ -55,6 +55,33 @@ teardown() {
     mock_teardown
 }
 
+# Keep streaming regressions bounded on both Linux and macOS, including Bats 1.7.
+# Separate process groups let the watchdog stop children that keep output FDs open.
+run_with_timeout() {
+    local seconds="$1"
+    shift
+    run bash -c '
+        seconds=$1
+        shift
+        set -m
+        "$@" &
+        task_pid=$!
+        (
+            sleep "$seconds"
+            printf "Test command exceeded %s seconds\n" "$seconds" >&2
+            kill -KILL -- "-$task_pid" 2>/dev/null
+        ) &
+        timer_pid=$!
+        set +m
+        result=0
+        wait "$task_pid" 2>/dev/null || result=$?
+        kill -KILL -- "-$task_pid" 2>/dev/null || :
+        kill -KILL -- "-$timer_pid" 2>/dev/null || :
+        wait "$timer_pid" 2>/dev/null || :
+        exit "$result"
+    ' _ "$seconds" "$@"
+}
+
 # ==============================================================================
 # GROUP 01: CORE MOCK LIFECYCLE
 # ==============================================================================
@@ -186,9 +213,13 @@ teardown() {
 }
 
 @test "match: regex (~) -> matches whitespace" {
-    mock grep "~\s+" "echo 'whitespace'"
+    # POSIX ERE works with both the GNU and macOS regex engines.
+    mock grep "~[[:space:]]+" "echo 'whitespace'"
     run grep "   "
     [ "$output" = "whitespace" ]
+    run grep $'\t'
+    [ "$output" = "whitespace" ]
+    run -127 grep "non-whitespace"
 }
 
 @test "match: regex (~) -> matches end of line anchors" {
@@ -223,6 +254,7 @@ teardown() {
     mock mycmd "" "echo 'empty'"
     run mycmd ""
     [ "$output" = "empty" ]
+    run -127 mycmd "non-empty"
 }
 
 @test "match: mixed -> empty arg followed by non-empty" {
@@ -332,6 +364,17 @@ teardown() {
     [ "$GLOBAL_VAR" = "modified" ]
 }
 
+@test "side_effect: return -> preserves arguments and variable changes" {
+    local RESULT=""
+    # shellcheck disable=SC2016  # evaluated by the mock
+    mock probe "*" 'RESULT="$#|$1|$2|$3"; return 23'
+    local result_code=0
+    probe "" "two words" "*" || result_code=$?
+    [ "$result_code" -eq 23 ]
+    [ "$RESULT" = '3||two words|*' ]
+    assert_stdin_at_index probe 0 ""
+}
+
 # ==============================================================================
 # GROUP 05: INTERACTIONS (Pipes, Recursion, Subshells)
 # ==============================================================================
@@ -384,6 +427,21 @@ teardown() {
     run arr "${my_arr[@]}"
     [ "$output" = "arrayed" ]
     assert_called_with "arr" "element 1 element 2"
+}
+
+@test "interaction: nested returns -> preserves outer status and arguments" {
+    local RESULT=""
+    mock inner "*" "return 3"
+    # shellcheck disable=SC2016  # evaluated by the mock
+    mock outer "*" 'inner "$@"; RESULT="$1"; return 9'
+    local result_code=0
+    outer value || result_code=$?
+    [ "$result_code" -eq 9 ]
+    [ "$RESULT" = value ]
+    assert_called_times inner 1
+    assert_called_times outer 1
+    assert_stdin_at_index inner 0 ""
+    assert_stdin_at_index outer 0 ""
 }
 
 # ==============================================================================
@@ -447,6 +505,15 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "unmock: unregistered -> leaves an existing function intact" {
+    # shellcheck disable=SC2329  # invoked indirectly by run
+    original() { echo original; }
+    unmock original
+    run original
+    [ "$status" -eq 0 ]
+    [ "$output" = original ]
+}
+
 # ==============================================================================
 # GROUP 07: SEQUENCES & CONCURRENCY
 # ==============================================================================
@@ -495,6 +562,29 @@ teardown() {
     mock_sequence seq "*" "echo C" "echo D"
     run seq
     [ "$output" = "C" ]
+}
+
+@test "sequence: uniqueness -> rapid registration uses distinct counters" {
+    local i
+    for ((i=0; i<25; i++)); do mock_sequence probe "*" true; done
+    local counters=( "$BATS_MOCK_STATE_DIR"/seq_probe_* )
+    [ "${#counters[@]}" -eq 25 ]
+}
+
+@test "sequence: invalid counter -> fails and releases the lock" {
+    mock_sequence probe "*" true
+    local counters=( "$BATS_MOCK_STATE_DIR"/seq_probe_* )
+    printf 'invalid\n' > "${counters[0]}"
+    run probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid sequence counter"* ]]
+    [ ! -d "${counters[0]}.lock" ]
+}
+
+@test "sequence: missing actions -> rejects an empty sequence" {
+    run mock_sequence probe "*"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MOCK ERROR"* ]]
 }
 
 # ==============================================================================
@@ -632,6 +722,15 @@ teardown() {
     assert_called_times "cmd" 0
 }
 
+@test "assert_called_times: decimal -> normalizes zeroes and rejects expressions" {
+    mock probe "*" true
+    local i
+    for ((i=0; i<9; i++)); do probe; done
+    assert_called_times probe 009
+    run assert_called_times probe '3*3'
+    [ "$status" -eq 1 ]
+}
+
 # ==============================================================================
 # GROUP 10: ASSERTIONS - ARGUMENTS
 # ==============================================================================
@@ -741,6 +840,21 @@ teardown() {
     log "one"
     run assert_called_at_index "log" 1 "one"
     [ "$status" -eq 1 ]
+    [[ "$output" == *"Index out of bounds"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+}
+
+@test "assert_called_at_index: decimal -> validates before array access" {
+    mock probe "*" true
+    local i
+    for ((i=0; i<9; i++)); do probe "$i"; done
+    assert_called_at_index probe 008 8
+    local index
+    for index in -1 '0+0' 18446744073709551616; do
+        run assert_called_at_index probe "$index" 0
+        [ "$status" -eq 1 ]
+        [[ "$output" != *"unbound variable"* ]]
+    done
 }
 
 @test "assert_args_contain: success -> substring found" {
@@ -754,6 +868,14 @@ teardown() {
     grep "-r" "."
     run assert_args_contain "grep" "-v"
     [ "$status" -eq 1 ]
+}
+
+@test "assert_args_contain: missing history -> reports one structured failure" {
+    run assert_args_contain absent value
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"No history"* ]]
+    [[ "$output" != *"No such file or directory"* ]]
+    [[ "$output" != *"History"* ]]
 }
 
 @test "assert_call_sequence: success -> verifies global order" {
@@ -779,6 +901,13 @@ teardown() {
     git fetch
     run assert_call_sequence "git fetch" "git push"
     [ "$status" -eq 1 ]
+}
+
+@test "assert_call_sequence: empty -> succeeds with and without history" {
+    assert_call_sequence
+    mock probe "*" true
+    probe
+    assert_call_sequence
 }
 
 # ==============================================================================
@@ -852,6 +981,15 @@ teardown() {
     [ "$status" -eq 1 ]
 }
 
+@test "security: reserved names -> protects all framework namespaces" {
+    local name
+    for name in mock::jit::compile mock::report::fail mock::sync::lock mock::history::search assert_called refute_called _BATS_MOCK_ACTION_probe; do
+        run mock "$name" "*" true
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"reserved framework function"* ]]
+    done
+}
+
 # ==============================================================================
 # GROUP 14: SYSTEM & CONFIGURATION
 # ==============================================================================
@@ -878,6 +1016,27 @@ teardown() {
     mock v2_tool "*" "echo 'v2'"
     run v2_tool
     [ "$output" = "v2" ]
+}
+
+@test "system: naming -> punctuation does not share rule state" {
+    mock a-b "*" "echo hyphen"
+    mock a_b "*" "echo underscore"
+    mock a.b "*" "echo dot"
+    mock a:b "*" "echo colon"
+    run a-b; [ "$output" = hyphen ]
+    run a_b; [ "$output" = underscore ]
+    run a.b; [ "$output" = dot ]
+    run a:b; [ "$output" = colon ]
+    unmock a-b
+    run a_b; [ "$output" = underscore ]
+}
+
+@test "system: loading -> sourcing the library twice is harmless" {
+    load "$BATS_TEST_DIRNAME/../load.bash"
+    mock probe "*" "echo loaded"
+    run probe
+    [ "$status" -eq 0 ]
+    [ "$output" = loaded ]
 }
 
 @test "system: payload -> handles huge arguments" {
@@ -914,6 +1073,20 @@ teardown() {
     rm -f "$custom_log"
 }
 
+@test "config: paths -> quotes and expansion characters remain literal" {
+    export BATS_MOCK_STATE_DIR="$BATS_TEST_TMPDIR/space ' \" \$HOME"
+    export BATS_MOCK_GLOBAL_LOG="$BATS_MOCK_STATE_DIR/global.log"
+    mock_setup
+    mock probe "*" "echo ok"
+    run probe
+    [ "$status" -eq 0 ]
+    [ "$output" = ok ]
+    assert_called_times probe 1
+    mock_sequence step "*" "echo first" "echo second"
+    run step; [ "$output" = first ]
+    run step; [ "$output" = second ]
+}
+
 @test "whitebox: dirty flag -> internal flag is set on creation" {
     mock dirty_check "*" "true"
     # mock() compiles immediately, so dirty should be 0
@@ -947,6 +1120,32 @@ teardown() {
 # ==============================================================================
 # GROUP 15: ERROR HANDLING & EDGE CASES
 # ==============================================================================
+
+@test "error: watchdog -> stops a stuck command and its output-holding children" {
+    run_with_timeout 1 bash -c 'trap "" TERM; sleep 30 & wait'
+    [ "$status" -eq 137 ]
+    [[ "$output" == *"Test command exceeded 1 seconds"* ]]
+}
+
+@test "error: watchdog -> closes output held by children after the command exits" {
+    run_with_timeout 1 bash -c 'sleep 30 & exit 0'
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "error: API arguments -> rejects missing and extra inputs" {
+    local function_name
+    for function_name in mock mock_spy mock_sequence unmock mock_strict_mode assert_called_times assert_called_at_index assert_stdin_at_index; do
+        run "$function_name"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"MOCK ERROR"* ]]
+    done
+    run mock_strict_mode 2
+    [ "$status" -eq 1 ]
+    [ "$BATS_MOCK_STRICT" = 1 ]
+    run mock probe "*" true extra
+    [ "$status" -eq 1 ]
+}
 
 @test "error: invalid regex -> regex syntax error returns status 2 (bash default)" {
     mock_strict_mode 0
@@ -1307,6 +1506,45 @@ teardown() {
     assert_stdin_equals "cmd" ""
 }
 
+@test "stdin: return -> writes history and removes the capture file" {
+    mock probe "*" "return 7"
+    run probe
+    [ "$status" -eq 7 ]
+    assert_stdin_at_index probe 0 ""
+    local leftovers=( "$BATS_MOCK_STATE_DIR"/*.stdin.tmp.* )
+    [ ! -e "${leftovers[0]}" ]
+}
+
+@test "stdin: unmatched -> keeps stdin and argument history aligned" {
+    mock probe yes true
+    run -127 probe no
+    assert_stdin_at_index probe 0 ""
+    probe yes
+    assert_stdin_at_index probe 1 ""
+}
+
+@test "stdin: index -> rejects negative, arithmetic and oversized indices" {
+    mock probe "*" true
+    probe
+    assert_stdin_at_index probe 000 ""
+    local index
+    for index in -1 '0+0' 18446744073709551616; do
+        run assert_stdin_at_index probe "$index" ""
+        [ "$status" -eq 1 ]
+        [[ "$output" != *"unbound variable"* ]]
+    done
+}
+
+@test "stdin: internal reads -> bypasses mocked cat" {
+    mock cat "*" "echo mocked"
+    mock probe "*" "command cat; return 6"
+    run_with_timeout 5 bash -c 'printf payload | probe'
+    [ "$status" -eq 6 ]
+    [ "$output" = payload ]
+    assert_stdin_equals probe payload
+    refute_called cat
+}
+
 # ==============================================================================
 # GROUP 20: SPY REGRESSIONS (Side Effects & Streaming)
 # ==============================================================================
@@ -1328,7 +1566,239 @@ teardown() {
     # yes produces infinite 'y'
     # head -n 1 reads one line and exits
     # The mock must handle this gracefully, propagating the SIGPIPE
-    run bash -c "yes | head -n 1"
+    run_with_timeout 5 bash -c "yes | head -n 1"
 
     [ "$status" -eq 0 ]
+    [ "$output" = y ]
+    assert_called_once_with head "-n 1"
+}
+
+@test "spy: child shell -> exports the saved function" {
+    # shellcheck disable=SC2329  # invoked in the child shell
+    original_child() { printf '%s\n' "$1"; }
+    mock_spy original_child
+    run_with_timeout 5 bash -c 'original_child hello'
+    [ "$status" -eq 0 ]
+    [ "$output" = hello ]
+    assert_called_once_with original_child hello
+}
+
+@test "spy: repeated registration -> retains the original and call history" {
+    original() { echo original; }
+    mock_spy original
+    original
+    mock_spy original
+    run_with_timeout 5 bash -c 'original'
+    [ "$status" -eq 0 ]
+    [ "$output" = original ]
+    assert_called_times original 2
+}
+
+@test "spy: open stdin -> ignored TERM cannot strand the capture process" {
+    original() { return 7; }
+    mock_spy original
+    local fifo="$BATS_TEST_TMPDIR/open-input"
+    mkfifo "$fifo"
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 5 bash -c 'exec 9<> "$1"; trap "" TERM; original <&9' _ "$fifo"
+    [ "$status" -eq 7 ]
+    [ "$output" = "" ]
+    assert_stdin_at_index original 0 ""
+}
+
+@test "spy: open stdin -> no-op returns without waiting for EOF" {
+    local fifo="$BATS_TEST_TMPDIR/open-input"
+    mkfifo "$fifo"
+    # Isolate the spy because Bats itself calls true while collecting output.
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 5 bash -c '
+        source "$1"
+        mock_spy true
+        exec 9<> "$2"
+        true <&9
+        assert_called_times true 1
+    ' _ "$BATS_TEST_DIRNAME/../load.bash" "$fifo"
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_called_times true 1
+}
+
+@test "spy: no-op -> consistently captures a short finite input" {
+    # shellcheck disable=SC2329  # invoked in the child shell
+    ignore_input() { :; }
+    mock_spy ignore_input
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 15 bash -c '
+        for ((i=0; i<50; i++)); do
+            printf "payload-%s\n" "$i" | ignore_input || exit
+        done
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    local i
+    for ((i=0; i<50; i++)); do
+        assert_stdin_at_index ignore_input "$i" "payload-$i"$'\n'
+    done
+}
+
+@test "spy: no-op -> does not drain an infinite producer forever" {
+    ignore_input() { :; }
+    mock_spy ignore_input
+    run_with_timeout 5 bash -c 'yes | ignore_input'
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_called_times ignore_input 1
+}
+
+@test "spy: concurrency -> parallel finite streams retain every call" {
+    mock_spy cat
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 10 bash -c '
+        pids=()
+        for ((i=0; i<20; i++)); do
+            printf "payload-%s\n" "$i" | cat >/dev/null &
+            pids+=("$!")
+        done
+        for pid in "${pids[@]}"; do wait "$pid" || exit; done
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_called_times cat 20
+    local i
+    for ((i=0; i<20; i++)); do
+        assert_stdin_equals cat "payload-$i"$'\n'
+    done
+}
+
+@test "spy: log lock -> times out and removes the capture file" {
+    mock_spy head
+    mkdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+    run_with_timeout 10 bash -c 'head -n 1 </dev/null'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MOCK TIMEOUT"* ]]
+    local leftovers=( "$BATS_MOCK_STATE_DIR"/*.stdin.tmp.* )
+    [ ! -e "${leftovers[0]}" ]
+    rmdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+}
+
+@test "spy: cleanup -> does not terminate children started by the action" {
+    # shellcheck disable=SC2034  # waited for in the child shell
+    launch_child() { sleep 0.2 & action_pid=$!; }
+    mock_spy launch_child
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 5 bash -c '
+        launch_child </dev/null
+        wait "$action_pid"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_called_times launch_child 1
+}
+
+@test "spy: nested stream -> infinite producer terminates after the first line" {
+    mock_spy cat
+    mock_spy head
+    run_with_timeout 5 bash -c 'yes | cat | head -n 1'
+    [ "$status" -eq 0 ]
+    [ "$output" = y ]
+    assert_called_times cat 1
+    assert_called_once_with head "-n 1"
+}
+
+@test "spy: finite stream -> forwards and captures more than a pipe buffer" {
+    mock_spy cat
+    run_with_timeout 5 bash -o pipefail -c 'dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr "\000" x | cat | wc -c'
+    [ "$status" -eq 0 ]
+    [ "${output//[[:space:]]/}" = 131072 ]
+    local captured_bytes
+    captured_bytes=$(wc -c < "$BATS_MOCK_STATE_DIR/cat.stdin.log")
+    [ "${captured_bytes//[[:space:]]/}" = 131073 ]
+    assert_called_times cat 1
+}
+
+@test "spy: newline-heavy stream -> encodes logs without quadratic slowdown" {
+    mock_spy cat
+    run_with_timeout 5 bash -o pipefail -c 'awk "BEGIN { for (i=0; i<65536; i++) print \"x\" }" | cat | wc -l'
+    [ "$status" -eq 0 ]
+    [ "${output//[[:space:]]/}" = 65536 ]
+    local captured_bytes
+    captured_bytes=$(wc -c < "$BATS_MOCK_STATE_DIR/cat.stdin.log")
+    [ "${captured_bytes//[[:space:]]/}" = 655361 ]
+    assert_called_times cat 1
+}
+
+@test "spy: pipefail -> preserves the producer SIGPIPE status" {
+    mock_spy head
+    run_with_timeout 5 bash -o pipefail -c 'yes | head -n 1'
+    [ "$status" -eq 141 ]
+    [ "$output" = y ]
+    assert_called_once_with head "-n 1"
+}
+
+@test "spy: inherited traps -> preserves the callers signal handlers" {
+    mock_spy head
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 5 bash -c '
+        trap "echo unexpected-signal" PIPE TERM
+        before=$(trap -p PIPE TERM)
+        head -n 1 </dev/null
+        [[ $(trap -p PIPE TERM) == "$before" ]]
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "spy: side effects -> preserves changes while reading stdin" {
+    # shellcheck disable=SC2034  # inspected by the child shell after the spy returns
+    consume_line() { IFS= read -r consumed_line; return 17; }
+    mock_spy consume_line
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 5 bash -c '
+        result=0
+        consume_line <<< payload || result=$?
+        [[ $result == 17 && $consumed_line == payload ]]
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_stdin_equals consume_line $'payload\n'
+}
+
+@test "spy: cleanup -> repeated direct calls reap their capture processes" {
+    mock_spy head
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 10 bash -c '
+        for ((i=0; i<25; i++)); do
+            head -n 1 </dev/null || exit
+            [[ -z $(jobs -pr) ]] || exit 1
+        done
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_called_times head 25
+}
+
+@test "spy: partial read -> preserves output and nonzero status" {
+    first_line() { local line; IFS= read -r line; printf '%s\n' "$line"; return 23; }
+    mock_spy first_line
+    run_with_timeout 5 bash -c 'yes payload | first_line'
+    [ "$status" -eq 23 ]
+    [ "$output" = payload ]
+    assert_called_times first_line 1
+}
+
+@test "spy: cleanup -> repeated calls leave no capture files or live children" {
+    mock_spy head
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 15 bash -c '
+        for ((i=0; i<50; i++)); do
+            result=$(yes | head -n 1) || exit
+            [[ $result == y ]] || exit 1
+        done
+        [[ -z $(jobs -pr) ]]
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    assert_called_times head 50
+    local leftovers=( "$BATS_MOCK_STATE_DIR"/*.stdin.tmp.* )
+    [ ! -e "${leftovers[0]}" ]
 }

@@ -39,7 +39,9 @@ export BATS_MOCK_STRICT
 export BATS_MOCK_GLOBAL_LOG
 
 # Internal prefix to avoid namespace collisions
-readonly BATS_MOCK_PREFIX="_BATS_MOCK"
+if [[ "${BATS_MOCK_PREFIX:-}" != "_BATS_MOCK" ]]; then
+    readonly BATS_MOCK_PREFIX="_BATS_MOCK"
+fi
 
 # ==============================================================================
 # INTERNAL UTILITIES
@@ -208,7 +210,47 @@ mock::report::fail() {
 #    String - Sanitized string (alphanumeric and underscores only).
 #######################################
 mock::internal::sanitize() {
-    echo "${1//[^a-zA-Z0-9_]/_}"
+    local _san_str="$1"
+    if [[ "$_san_str" == *[!a-zA-Z0-9_]* ]]; then
+        # The reserved prefix separates encoded names from ordinary identifiers.
+        _san_str="${_san_str//_/_u}"
+        _san_str="${_san_str//./_d}"
+        _san_str="${_san_str//:/_c}"
+        _san_str="${_san_str//-/_h}"
+        _san_str="${BATS_MOCK_PREFIX}_ENCODED_${_san_str}"
+    fi
+    printf '%s\n' "$_san_str"
+}
+
+#######################################
+# Validates a command name before generating code or writing state files.
+#######################################
+mock::internal::validate_name() {
+    local _vn_cmd="${1:-}"
+    if [[ ! "$_vn_cmd" =~ ^[a-zA-Z0-9._:-]+$ ]]; then
+        printf "MOCK ERROR: Invalid function name '%s'. Mocks must not contain shell meta-characters.\n" "$_vn_cmd" >&2
+        return 1
+    fi
+
+    case "$_vn_cmd" in
+        mock|unmock|mock_*|mock::*|_BATS_MOCK*|assert_called*|refute_called*|assert_stdin*|assert_args_contain|assert_call_sequence)
+            printf "MOCK ERROR: '%s' is a reserved framework function and cannot be mocked.\n" "$_vn_cmd" >&2
+            return 1
+            ;;
+    esac
+}
+
+#######################################
+# Normalizes an unsigned decimal without evaluating arithmetic expressions.
+#######################################
+mock::internal::decimal() {
+    local _dec_value="${1:-}"
+    if [[ ! "$_dec_value" =~ ^[0-9]+$ ]]; then
+        printf "MOCK ERROR: Expected a non-negative decimal integer, got '%s'.\n" "$_dec_value" >&2
+        return 1
+    fi
+    _dec_value="${_dec_value#"${_dec_value%%[!0]*}"}"
+    printf '%s\n' "${_dec_value:-0}"
 }
 
 #######################################
@@ -224,10 +266,11 @@ mock::internal::sanitize() {
 #######################################
 mock::jit::compile() {
     local _jit_cmd="$1"
-    local _jit_safe_cmd="${_jit_cmd//[^a-zA-Z0-9_]/_}"
+    local _jit_safe_cmd
+    _jit_safe_cmd=$(mock::internal::sanitize "$_jit_cmd")
 
     local _jit_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_jit_safe_cmd}"
-    if [[ "${!_jit_dirty_var:-0}" -eq 0 ]] && declare -f "$_jit_cmd" >/dev/null; then
+    if [[ "${!_jit_dirty_var:-0}" -eq 0 ]] && declare -f -- "$_jit_cmd" >/dev/null; then
         return 0
     fi
 
@@ -254,26 +297,39 @@ mock::jit::compile() {
     done
     export "${BATS_MOCK_PREFIX}_RULE_COUNT_${_jit_safe_cmd}=$_jit_count"
 
-    local _jit_func_body=""
+    local _jit_state_dir _jit_global_log
+    printf -v _jit_state_dir '%q' "$BATS_MOCK_STATE_DIR"
+    printf -v _jit_global_log '%q' "$BATS_MOCK_GLOBAL_LOG"
+
+    # A separate function contains action-level `return` without losing side effects.
+    local _jit_action_func="${BATS_MOCK_PREFIX}_ACTION_${_jit_safe_cmd}"
+    local _jit_func_body="${_jit_action_func}() {
+        eval \"\${!act_var}\"
+    }
+    "
 
     # 1. Logging Logic (Global & Local)
     _jit_func_body+="${_jit_cmd}() {
-        local args=\"\$*\"
+        local args
+        local _mock_state_dir=$_jit_state_dir
+        local _mock_global_log=$_jit_global_log
+        builtin printf -v args '%s ' \"\$@\"
+        args=\"\${args% }\"
         local cmd_name=\"${_jit_cmd}\"
         local timestamp
-        printf -v timestamp \"%(%s)T\" -1 2>/dev/null || timestamp=\$(date +%s)
+        builtin printf -v timestamp \"%(%s)T\" -1 2>/dev/null || timestamp=\$(command date +%s)
 
         # Generate a unique temp file for stdin capture for this specific call
-        local stdin_tmp=\"${BATS_MOCK_STATE_DIR}/${_jit_cmd}.stdin.tmp.\$$.\$RANDOM\"
+        local stdin_tmp
 
         local serialized_args
-        printf -v serialized_args \"%q \" \"\$@\"
+        builtin printf -v serialized_args \"%q \" \"\$@\"
         serialized_args=\"\${serialized_args% }\"
 
         local log_safe_args=\"\${args//\$'\n'/<newline>}\"
 
-        { printf \"[%s] %s %s\n\" \"\$timestamp\" \"\$cmd_name\" \"\$serialized_args\"; } >> \"${BATS_MOCK_GLOBAL_LOG}\"
-        { printf \"%s\n\" \"\$log_safe_args\"; } >> \"${BATS_MOCK_STATE_DIR}/${_jit_cmd}.log\"
+        builtin printf \"[%s] %s %s\n\" \"\$timestamp\" \"\$cmd_name\" \"\$serialized_args\" >> \"\$_mock_global_log\" || return 1
+        builtin printf \"%s\n\" \"\$log_safe_args\" >> \"\$_mock_state_dir/${_jit_cmd}.log\" || return 1
     "
 
     # 2. Matching Logic (LIFO)
@@ -300,28 +356,40 @@ mock::jit::compile() {
 
             if [[ \"\$matched\" -eq 1 ]]; then
                 if [[ ! -t 0 ]]; then
-                    # Non-blocking capture via tee with FD management to allow waiting
-                    # Use exec to assign a file descriptor and capture the PID
-                    # trap '' PIPE ensures tee keeps writing to file even if action closes stdin early
+                    stdin_tmp=\$(command mktemp \"\$_mock_state_dir/${_jit_cmd}.stdin.tmp.XXXXXXXX\") || return 1
+                    # Exec makes the saved PID the capture process, not a shell that
+                    # could leave a tee child holding the pipeline open.
                     local stdin_fd
-                    exec {stdin_fd}< <(trap '' PIPE; tee \"\$stdin_tmp\")
+                    exec {stdin_fd}< <(trap '' PIPE; exec tee \"\$stdin_tmp\")
                     local stdin_pid=\$!
 
-                    eval \"\${!act_var}\" <&\$stdin_fd
-                    return_code=\$?
+                    if ${_jit_action_func} \"\$@\" <&\$stdin_fd; then
+                        return_code=0
+                    else
+                        return_code=\$?
+                    fi
 
-                    # Cleanup FD
-                    exec {stdin_fd}<&-
+                    # Give finite input a chance to finish even when the action
+                    # reads nothing. Both a byte limit and a deadline are needed:
+                    # neither an infinite producer nor an idle pipe may block us.
+                    local unread_stdin
+                    LC_ALL=C builtin read -r -t 0.1 -N 65536 unread_stdin <&\$stdin_fd || :
 
-                    # Explicitly terminate tee to avoid hangs on infinite streams (e.g. yes | mock_spy)
-                    # where the pipe might remain open by leaked FDs or buffering issues.
-                    kill \"\$stdin_pid\" 2>/dev/null || true
+                    # The action is finished; stop only our capture child. TERM
+                    # can be inherited as ignored, leaving wait blocked forever.
+                    builtin kill -KILL \"\$stdin_pid\" 2>/dev/null || :
 
                     # Wait for process termination to avoid race conditions on log file access
-                    wait \"\$stdin_pid\" 2>/dev/null || true
+                    builtin wait \"\$stdin_pid\" 2>/dev/null || :
+                    # Keep the reader open until tee exits, avoiding a BSD tee
+                    # broken-pipe diagnostic between closing and terminating it.
+                    exec {stdin_fd}<&-
                 else
-                    eval \"\${!act_var}\"
-                    return_code=\$?
+                    if ${_jit_action_func} \"\$@\"; then
+                        return_code=0
+                    else
+                        return_code=\$?
+                    fi
                 fi
                 executed=1
                 break
@@ -332,26 +400,48 @@ mock::jit::compile() {
         if [[ \"\$executed\" -eq 0 ]]; then
              if [[ \"\${BATS_MOCK_STRICT:-0}\" -eq 1 ]]; then
                 echo \"MOCK ERROR: '${_jit_cmd}' called with unexpected args: '\$args'\" >&2
-                return 127
+                return_code=127
              fi
         fi
 
+        # Serialize complete records, including large records that require more
+        # than one write. A stale lock must fail instead of hanging the caller.
+        local stdin_lock=\"\$_mock_state_dir/${_jit_cmd}.stdin.log.lock\"
+        local lock_attempts=0
+        while ! command mkdir -- \"\$stdin_lock\" 2>/dev/null; do
+             if (( lock_attempts >= 50 )); then
+                 builtin printf 'MOCK TIMEOUT: Could not acquire stdin log lock for %s\\n' \"\$cmd_name\" >&2
+                 [[ -z \"\${stdin_tmp:-}\" ]] || command rm -f -- \"\$stdin_tmp\"
+                 return 1
+             fi
+             ((lock_attempts+=1))
+             command sleep 0.1
+        done
+
+        local log_status=0
         # Process the captured stdin log after action completion
-        if [[ -f \"\$stdin_tmp\" ]]; then
-             local cap_in=\$(cat \"\$stdin_tmp\"; echo \"x\")
-             cap_in=\"\${cap_in%x}\"
-             local safe_in=\"\${cap_in//\$'\n'/<newline>}\"
-             printf \"%s\n\" \"\$safe_in\" >> \"${BATS_MOCK_STATE_DIR}/${_jit_cmd}.stdin.log\"
-             rm -f \"\$stdin_tmp\"
+        if [[ -f \"\${stdin_tmp:-}\" ]]; then
+             # Stream the encoding: Bash replacement is quadratic on dense
+             # newlines. The sentinel preserves an unterminated final line.
+             { command cat -- \"\$stdin_tmp\"; builtin printf x; } |
+                 LC_ALL=C command awk '
+                     NR > 1 { printf \"%s<newline>\", previous }
+                     { previous = \$0 }
+                     END { printf \"%s\\n\", substr(previous, 1, length(previous) - 1) }
+                 ' >> \"\$_mock_state_dir/${_jit_cmd}.stdin.log\" || log_status=\$?
+             command rm -f -- \"\$stdin_tmp\" || log_status=\$?
         else
              # Log empty line to maintain index alignment with args log
-             echo \"\" >> \"${BATS_MOCK_STATE_DIR}/${_jit_cmd}.stdin.log\"
+             builtin printf '\n' >> \"\$_mock_state_dir/${_jit_cmd}.stdin.log\" || log_status=\$?
         fi
+        command rmdir -- \"\$stdin_lock\" || log_status=\$?
+        (( log_status == 0 )) || return \$log_status
 
         return \$return_code
     }"
 
-    eval "$_jit_func_body"
+    eval "$_jit_func_body" || return 1
+    export -f "${_jit_action_func?}"
     if [[ "$_jit_cmd" =~ ^[a-zA-Z0-9_]+$ ]]; then
         export -f "${_jit_cmd?}"
     fi
@@ -376,9 +466,10 @@ mock::jit::add_rule() {
     local _ar_action="$3"
     local _ar_rules_file="${BATS_MOCK_STATE_DIR}/${_ar_cmd_name}.rules"
 
-    printf "%s\0%s\0" "$_ar_pattern" "$_ar_action" >> "$_ar_rules_file"
+    printf "%s\0%s\0" "$_ar_pattern" "$_ar_action" >> "$_ar_rules_file" || return 1
 
-    local _ar_safe_cmd="${_ar_cmd_name//[^a-zA-Z0-9_]/_}"
+    local _ar_safe_cmd
+    _ar_safe_cmd=$(mock::internal::sanitize "$_ar_cmd_name")
     local _ar_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_ar_safe_cmd}"
     printf -v "$_ar_dirty_var" "1"
     export "${_ar_dirty_var?}"
@@ -432,38 +523,29 @@ mock_teardown() {
 #######################################
 mock() {
     local _m_cmd="${1:-}"
-    local _m_pat="${2:-*}"
-    local _m_act="${3:-true}"
-
-    # Validate Function Name (Security)
-    if [[ ! "$_m_cmd" =~ ^[a-zA-Z0-9._:-]{1,}$ ]]; then
-        echo "MOCK ERROR: Invalid function name '$_m_cmd'. Mocks must not contain shell meta-characters." >&2
+    local _m_pat="${2-*}"
+    local _m_act="${3-true}"
+    if (( $# < 1 || $# > 3 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: mock COMMAND [PATTERN] [ACTION]' >&2
         return 1
     fi
-
-    # Protect Framework Internals (Stability)
-    local _m_reserved_pattern="^(mock|unmock|mock_setup|mock_teardown|mock_spy|mock_sequence|mock_strict_mode|mock_debug|mock::internal::.*)$"
-
-    if [[ "$_m_cmd" =~ $_m_reserved_pattern ]]; then
-        echo "MOCK ERROR: '$_m_cmd' is a reserved framework function and cannot be mocked." >&2
-        return 1
-    fi
+    mock::internal::validate_name "$_m_cmd" || return 1
 
     # Initialize log and BACKUP ORIGINAL if this is the first interaction
     if [[ ! -f "${BATS_MOCK_STATE_DIR}/${_m_cmd}.log" ]]; then
-        : > "${BATS_MOCK_STATE_DIR}/${_m_cmd}.log"
-        : > "${BATS_MOCK_STATE_DIR}/${_m_cmd}.stdin.log"
+        : > "${BATS_MOCK_STATE_DIR}/${_m_cmd}.log" || return 1
+        : > "${BATS_MOCK_STATE_DIR}/${_m_cmd}.stdin.log" || return 1
 
         # Check for existing function to backup (save-and-restore)
         local _m_orig_file="${BATS_MOCK_STATE_DIR}/${_m_cmd}.orig"
-        if declare -f "$_m_cmd" > "$_m_orig_file" 2>/dev/null; then
+        if declare -f -- "$_m_cmd" > "$_m_orig_file" 2>/dev/null; then
              :
         else
-             rm -f "$_m_orig_file"
+             command rm -f -- "$_m_orig_file"
         fi
     fi
 
-    mock::jit::add_rule "$_m_cmd" "$_m_pat" "$_m_act"
+    mock::jit::add_rule "$_m_cmd" "$_m_pat" "$_m_act" || return 1
     mock::jit::compile "$_m_cmd"
 }
 
@@ -476,11 +558,18 @@ mock() {
 #    unmock git
 #######################################
 unmock() {
-    local _um_cmd="$1"
-    unset -f "$_um_cmd"
+    local _um_cmd="${1:-}"
+    if (( $# != 1 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: unmock COMMAND' >&2
+        return 1
+    fi
+    mock::internal::validate_name "$_um_cmd" || return 1
+    [[ -f "${BATS_MOCK_STATE_DIR}/${_um_cmd}.rules" ]] || return 0
+    unset -f -- "$_um_cmd"
     unset -v "BASH_FUNC_${_um_cmd}%%" 2>/dev/null || true
 
-    local _um_safe_cmd="${_um_cmd//[^a-zA-Z0-9_]/_}"
+    local _um_safe_cmd
+    _um_safe_cmd=$(mock::internal::sanitize "$_um_cmd")
 
     # Safely unset all rule variables
     local _um_count_var="${BATS_MOCK_PREFIX}_RULE_COUNT_${_um_safe_cmd}"
@@ -493,19 +582,20 @@ unmock() {
     unset "$_um_count_var"
     unset "${BATS_MOCK_PREFIX}_DIRTY_${_um_safe_cmd}"
     unset -f "${BATS_MOCK_PREFIX}_SPY_ORIGINAL_${_um_safe_cmd}"
+    unset -f "${BATS_MOCK_PREFIX}_ACTION_${_um_safe_cmd}"
 
     # Restore original function if backup exists
     local _um_orig_file="${BATS_MOCK_STATE_DIR}/${_um_cmd}.orig"
     if [[ -f "$_um_orig_file" ]]; then
         # shellcheck source=/dev/null
-        source "$_um_orig_file" || true
-        rm -f "$_um_orig_file"
+        source "$_um_orig_file" || return 1
+        command rm -f -- "$_um_orig_file"
     fi
 
     # Clean up state files
-    rm -f "${BATS_MOCK_STATE_DIR}/${_um_cmd}.rules"
-    rm -f "${BATS_MOCK_STATE_DIR}/${_um_cmd}.log"
-    rm -f "${BATS_MOCK_STATE_DIR}/${_um_cmd}.stdin.log"
+    command rm -f -- "${BATS_MOCK_STATE_DIR}/${_um_cmd}.rules" \
+        "${BATS_MOCK_STATE_DIR}/${_um_cmd}.log" \
+        "${BATS_MOCK_STATE_DIR}/${_um_cmd}.stdin.log"
 }
 
 #######################################
@@ -518,14 +608,27 @@ unmock() {
 #    mock_spy curl
 #######################################
 mock_spy() {
-    local _ms_cmd="$1"
+    local _ms_cmd="${1:-}"
+    if (( $# != 1 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: mock_spy COMMAND' >&2
+        return 1
+    fi
+    mock::internal::validate_name "$_ms_cmd" || return 1
 
-    if declare -f "$_ms_cmd" >/dev/null; then
-        local _ms_safe_cmd="${_ms_cmd//[^a-zA-Z0-9_]/_}"
+    local _ms_orig_def=""
+    # Keep existing history, but never save a generated wrapper as the original.
+    if [[ -f "${BATS_MOCK_STATE_DIR}/${_ms_cmd}.rules" ]]; then
+        if [[ -f "${BATS_MOCK_STATE_DIR}/${_ms_cmd}.orig" ]]; then
+            _ms_orig_def=$(< "${BATS_MOCK_STATE_DIR}/${_ms_cmd}.orig")
+        fi
+    elif declare -f -- "$_ms_cmd" >/dev/null; then
+        _ms_orig_def=$(declare -f -- "$_ms_cmd")
+    fi
+
+    if [[ -n "$_ms_orig_def" ]]; then
+        local _ms_safe_cmd
+        _ms_safe_cmd=$(mock::internal::sanitize "$_ms_cmd")
         local _ms_hidden_name="${BATS_MOCK_PREFIX}_SPY_ORIGINAL_${_ms_safe_cmd}"
-
-        local _ms_orig_def
-        _ms_orig_def=$(declare -f "$_ms_cmd")
 
         # Bash 'declare -f' standardizes output to "name ()".
         # We replace the FIRST occurrence of the name with the hidden name.
@@ -535,10 +638,11 @@ mock_spy() {
              _ms_new_def="${_ms_orig_def/function $_ms_cmd/$_ms_hidden_name}"
         fi
 
-        eval "$_ms_new_def"
+        eval "$_ms_new_def" || return 1
+        export -f "${_ms_hidden_name?}"
         mock "$_ms_cmd" "*" "$_ms_hidden_name \"\$@\""
     else
-        mock "$_ms_cmd" "*" "command ${_ms_cmd} \"\$@\""
+        mock "$_ms_cmd" "*" "command -- ${_ms_cmd} \"\$@\""
     fi
 }
 
@@ -554,37 +658,50 @@ mock_spy() {
 #    mock_sequence seq_cmd "*" "echo 1" "echo 2" "echo 3"
 #######################################
 mock_sequence() {
+    if (( $# < 3 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: mock_sequence COMMAND PATTERN ACTION...' >&2
+        return 1
+    fi
     local _seq_cmd="$1"
     local _seq_pat="$2"
+    mock::internal::validate_name "$_seq_cmd" || return 1
     shift 2
     local _seq_actions=("$@")
 
     local _seq_counter_file
-    _seq_counter_file="${BATS_MOCK_STATE_DIR}/seq_${_seq_cmd}_$(date +%s%N)"
-    echo "0" > "$_seq_counter_file"
+    _seq_counter_file=$(command mktemp "${BATS_MOCK_STATE_DIR}/seq_${_seq_cmd}_XXXXXXXX") || return 1
+    printf '0\n' > "$_seq_counter_file" || return 1
+    local _seq_counter_quoted
+    printf -v _seq_counter_quoted '%q' "$_seq_counter_file"
 
     local _seq_script=""
 
     # Inline locking logic for subshell portability
     _seq_script+="
-    local lock_dir='${_seq_counter_file}.lock'
+    local counter_file=$_seq_counter_quoted
+    local lock_dir=\"\${counter_file}.lock\"
     local idx=0
 
     # 1. Acquire Lock
     local i=0
-    while ! mkdir \"\$lock_dir\" 2>/dev/null; do
+    while ! command mkdir -- \"\$lock_dir\" 2>/dev/null; do
         if (( i++ > 50 )); then echo 'Lock timeout' >&2; return 1; fi
-        sleep 0.1
+        command sleep 0.1
     done
 
     # 2. Critical Section
-    if [[ -f '${_seq_counter_file}' ]]; then
-        read -r idx < '${_seq_counter_file}'
+    if ! IFS= read -r idx < \"\$counter_file\" || [[ ! \$idx =~ ^[0-9]+$ ]]; then
+        command rmdir -- \"\$lock_dir\" 2>/dev/null || true
+        echo 'MOCK ERROR: Invalid sequence counter' >&2
+        return 1
     fi
-    echo \$((idx + 1)) > '${_seq_counter_file}'
+    if ! builtin printf '%s\n' \$((idx + 1)) > \"\$counter_file\"; then
+        command rmdir -- \"\$lock_dir\" 2>/dev/null || true
+        return 1
+    fi
 
     # 3. Release Lock
-    rmdir \"\$lock_dir\" 2>/dev/null || true
+    command rmdir -- \"\$lock_dir\" 2>/dev/null || true
 
     case \$idx in
     "
@@ -612,6 +729,10 @@ mock_sequence() {
 #    mock_strict_mode 1
 #######################################
 mock_strict_mode() {
+    if (( $# != 1 )) || [[ "$1" != 0 && "$1" != 1 ]]; then
+        printf '%s\n' 'MOCK ERROR: Usage: mock_strict_mode 0|1' >&2
+        return 1
+    fi
     export BATS_MOCK_STRICT="$1"
 }
 
@@ -644,6 +765,7 @@ mock::history::search() {
     [[ -f "$_search_log" ]] || return 1
 
     local _search_safe_pat="${_search_pat//$'\n'/<newline>}"
+    local _search_line
 
     while IFS= read -r _search_line; do
         # 1. Literal Match (Prefix '=')
@@ -858,8 +980,13 @@ refute_called_exact() {
 #    assert_called_times git 3
 #######################################
 assert_called_times() {
+    if (( $# != 2 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: assert_called_times COMMAND COUNT' >&2
+        return 1
+    fi
     local _act_cmd="$1"
-    local _act_expected="$2"
+    local _act_expected
+    _act_expected=$(mock::internal::decimal "$2") || return 1
     local _act_count=0
     local _act_log="${BATS_MOCK_STATE_DIR}/${_act_cmd}.log"
 
@@ -867,7 +994,7 @@ assert_called_times() {
         _act_count=$(wc -l < "$_act_log")
     fi
 
-    if [[ "${_act_count// /}" -ne "$_act_expected" ]]; then
+    if [[ "${_act_count//[[:space:]]/}" != "$_act_expected" ]]; then
         mock::report::fail "$_act_cmd" "Count Mismatch" "$_act_expected times" "Actual" "${_act_count// /}"
         return 1
     fi
@@ -887,8 +1014,13 @@ assert_called_times() {
 #    assert_called_at_index git 0 "fetch"
 #######################################
 assert_called_at_index() {
+    if (( $# < 2 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: assert_called_at_index COMMAND INDEX [PATTERN...]' >&2
+        return 1
+    fi
     local _aci_cmd="$1"
-    local _aci_index="$2"
+    local _aci_index
+    _aci_index=$(mock::internal::decimal "$2") || return 1
     shift 2
     local _aci_pattern="$*"
     local _aci_log="${BATS_MOCK_STATE_DIR}/${_aci_cmd}.log"
@@ -901,11 +1033,12 @@ assert_called_at_index() {
     local _aci_lines=()
     mapfile -t _aci_lines < "$_aci_log"
 
-    local _aci_actual_line="${_aci_lines[$_aci_index]}"
-    if [[ -z "$_aci_actual_line" && "${#_aci_lines[@]}" -le "$_aci_index" ]]; then
+    local _aci_size=${#_aci_lines[@]}
+    if [[ ${#_aci_index} -gt ${#_aci_size} ]] || (( _aci_index >= _aci_size )); then
          mock::report::fail "$_aci_cmd" "Index Failure" "Call at index $_aci_index" "Status" "Index out of bounds (Size: ${#_aci_lines[@]})"
          return 1
     fi
+    local _aci_actual_line="${_aci_lines[$_aci_index]}"
 
     # Support Regex match here too
     # Sanitize pattern for multiline comparison
@@ -962,8 +1095,13 @@ assert_stdin_equals() {
 #    assert_stdin_at_index cat 0 "input data"
 #######################################
 assert_stdin_at_index() {
+    if (( $# < 2 )); then
+        printf '%s\n' 'MOCK ERROR: Usage: assert_stdin_at_index COMMAND INDEX [TEXT...]' >&2
+        return 1
+    fi
     local _asi_cmd="$1"
-    local _asi_index="$2"
+    local _asi_index
+    _asi_index=$(mock::internal::decimal "$2") || return 1
     shift 2
     local _asi_pattern="$*"
     local _asi_log="${BATS_MOCK_STATE_DIR}/${_asi_cmd}.stdin.log"
@@ -976,11 +1114,12 @@ assert_stdin_at_index() {
     local _asi_lines=()
     mapfile -t _asi_lines < "$_asi_log"
 
-    local _asi_actual_line="${_asi_lines[$_asi_index]}"
-    if [[ -z "$_asi_actual_line" && "${#_asi_lines[@]}" -le "$_asi_index" ]]; then
+    local _asi_size=${#_asi_lines[@]}
+    if [[ ${#_asi_index} -gt ${#_asi_size} ]] || (( _asi_index >= _asi_size )); then
          mock::report::fail "$_asi_cmd" "Index Failure" "Stdin at index $_asi_index" "Status" "Index out of bounds (Size: ${#_asi_lines[@]})"
          return 1
     fi
+    local _asi_actual_line="${_asi_lines[$_asi_index]}"
 
     local _asi_safe_pattern="${_asi_pattern//$'\n'/<newline>}"
 
@@ -1009,8 +1148,12 @@ assert_args_contain() {
     local _asc_substring="$2"
     local _asc_log="${BATS_MOCK_STATE_DIR}/${_asc_cmd}.log"
 
-    [[ ! -f "$_asc_log" ]] && mock::report::fail "$_asc_cmd" "Search Failure" "Args containing: '$_asc_substring'" "Status" "No history" && return 1
+    if [[ ! -f "$_asc_log" ]]; then
+        mock::report::fail "$_asc_cmd" "Search Failure" "Args containing: '$_asc_substring'" "Status" "No history"
+        return 1
+    fi
 
+    local _asc_line
     while IFS= read -r _asc_line; do
         if [[ "$_asc_line" == *"$_asc_substring"* ]]; then return 0; fi
     done < "$_asc_log"
@@ -1031,6 +1174,7 @@ assert_args_contain() {
 #    assert_call_sequence "git fetch" "git merge"
 #######################################
 assert_call_sequence() {
+    (( $# > 0 )) || return 0
     local _acs_expected_sequence=("$@")
     local _acs_global_log="$BATS_MOCK_GLOBAL_LOG"
 
