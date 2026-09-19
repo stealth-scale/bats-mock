@@ -173,6 +173,23 @@ slow_lock_attempts() {
     assert_call_sequence probe
 }
 
+@test "core: lifecycle arguments -> rejects inputs without changing the owned session" {
+    mock probe '*' true
+    probe before
+    local owner function_name
+    owner=$(< "$BATS_MOCK_STATE_DIR/.owner")
+    for function_name in mock_setup mock_teardown; do
+        run "$function_name" unexpected
+        [ "$status" -eq 1 ]
+        [ "$output" = "MOCK ERROR: Usage: $function_name" ]
+        [ "$(< "$BATS_MOCK_STATE_DIR/.owner")" = "$owner" ]
+        assert_called_times probe 1
+        assert_called_at_index_with_args probe 0 before
+    done
+    probe after
+    assert_called_times probe 2
+}
+
 @test "core: teardown -> restores functions and removes generated helpers" {
     # shellcheck disable=SC2329  # restored, then invoked through run
     original() { echo original; }
@@ -988,6 +1005,41 @@ slow_lock_attempts() {
     assert_called_at_index "log" 1 "two"
 }
 
+@test "assert_called_at_index: regex -> matches only the selected call" {
+    mock probe '*' true
+    probe 'job-42 ready'
+    probe 'job-7 failed'
+    assert_called_at_index probe 0 '~^job-[0-9]+ ready$'
+    assert_called_at_index probe 1 '~^job-[0-9]+ failed$'
+    run assert_called_at_index probe 1 '~^job-[0-9]+ ready$'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Argument Mismatch'* ]]
+    [[ "$output" == *"Index 1 matching: '~^job-[0-9]+ ready$'"* ]]
+    [[ "$output" == *'Actual     : job-7 failed'* ]]
+}
+
+@test "assertions: missing log -> registered mocks report one structured failure" {
+    mock probe '*' true
+    probe value
+    mv "$BATS_MOCK_STATE_DIR/probe.log" "$BATS_MOCK_STATE_DIR/probe.log.saved"
+    local function_name
+    for function_name in assert_called_at_index assert_stdin_at_index assert_args_contain; do
+        if [[ "$function_name" == assert_args_contain ]]; then
+            run "$function_name" probe value
+        else
+            run "$function_name" probe 0 value
+        fi
+        [ "$status" -eq 1 ]
+        [[ "$output" == *'No history'* ]]
+        [[ "$output" != *'Unregistered Mock'* ]]
+        [[ "$output" != *'No such file or directory'* ]]
+        [[ "$output" != *'unbound variable'* ]]
+    done
+    mv "$BATS_MOCK_STATE_DIR/probe.log.saved" "$BATS_MOCK_STATE_DIR/probe.log"
+    assert_called_at_index probe 0 value
+    assert_args_contain probe value
+}
+
 @test "assert_called_at_index: fail -> wrong arg at index" {
     mock log "*" "true"
     log "one"
@@ -1070,6 +1122,25 @@ slow_lock_attempts() {
     assert_call_sequence
 }
 
+@test "assert_call_sequence: missing log -> fails without creating replacement history" {
+    mv "$BATS_MOCK_GLOBAL_LOG" "$BATS_MOCK_GLOBAL_LOG.saved"
+    run assert_call_sequence 'probe value'
+    [ "$status" -eq 1 ]
+    [ "$output" = "Global mock log not found at: $BATS_MOCK_GLOBAL_LOG" ]
+    [ ! -e "$BATS_MOCK_GLOBAL_LOG" ]
+    assert_call_sequence
+    mv "$BATS_MOCK_GLOBAL_LOG.saved" "$BATS_MOCK_GLOBAL_LOG"
+}
+
+@test "assert_call_sequence: no calls -> reports zero progress and an empty log" {
+    mock probe '*' true
+    run assert_call_sequence 'probe first' 'probe second'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Matched 0 of 2 items.'* ]]
+    [[ "$output" == *"Waiting for: 'probe first'"* ]]
+    [[ "$output" == *'    (Empty)'* ]]
+}
+
 @test "assert_call_sequence: command boundary -> rejects a longer command name" {
     mock api_v2 '*' true
     api_v2
@@ -1144,6 +1215,39 @@ slow_lock_attempts() {
     [[ "$output" == *"2 arguments: a\\ b ''"* ]]
 }
 
+@test "feedback: stdin -> distinguishes an uncalled mock from recorded empty input" {
+    mock probe '*' 'cat >/dev/null'
+    run assert_stdin_equals probe expected
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Stdin Mismatch'* ]]
+    [[ "$output" == *'(No stdin recorded)'* ]]
+    printf '' | probe
+    assert_stdin_equals probe ''
+    run assert_stdin_equals probe expected
+    [ "$status" -eq 1 ]
+    [[ "$output" != *'(No stdin recorded)'* ]]
+    assert_called_times probe 1
+}
+
+@test "feedback: stdin -> bounds diagnostic history without truncating captured data" {
+    mock probe '*' 'cat >/dev/null'
+    local payload i
+    printf -v payload '%1000s' ''
+    payload=${payload// /x}
+    printf '%s' "$payload" | probe
+    for ((i=2; i<=12; i++)); do printf 'entry-%s' "$i" | probe; done
+    assert_stdin_at_index probe 0 "$payload"
+    assert_stdin_equals probe entry-12
+    run assert_stdin_equals probe missing
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"${payload:0:240}..."* ]]
+    [[ "$output" != *"$payload"* ]]
+    [[ "$output" == *entry-10* ]]
+    [[ "$output" != *entry-11* ]]
+    [[ "$output" != *entry-12* ]]
+    [[ "$output" == *'and 2 more calls'* ]]
+}
+
 @test "debug: mock_debug -> runs without error" {
     mock git "*" "true"
     git status
@@ -1152,6 +1256,32 @@ slow_lock_attempts() {
     run mock_debug 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"MOCK DEBUG REPORT"* ]]
+}
+
+@test "debug: idle mocks -> prints multiline rules without executing them" {
+    mock idle_probe '*' $'printf first\nprintf second'
+    run mock_debug 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'[ IDLE MOCKS ]'* ]]
+    [[ "$output" == *'  idle_probe'* ]]
+    [[ "$output" == *"Rule 1: pattern '*'"* ]]
+    [[ "$output" == *'             | printf first'* ]]
+    [[ "$output" == *'             | printf second'* ]]
+    assert_called_times idle_probe 0
+}
+
+@test "debug: default descriptor -> falls back to stderr when fd 3 is closed" {
+    mock_debug >"$BATS_TEST_TMPDIR/debug.out" 2>"$BATS_TEST_TMPDIR/debug.err" 3>&-
+    [ ! -s "$BATS_TEST_TMPDIR/debug.out" ]
+    [[ "$(< "$BATS_TEST_TMPDIR/debug.err")" == *'MOCK DEBUG REPORT'* ]]
+}
+
+@test "debug: default descriptor -> uses fd 3 when proc exposes it" {
+    [[ -d /proc/self/fd ]] || skip '/proc/self/fd is not available on this platform'
+    mock_debug 3>"$BATS_TEST_TMPDIR/debug.fd3" >"$BATS_TEST_TMPDIR/debug.out" 2>"$BATS_TEST_TMPDIR/debug.err"
+    [ ! -s "$BATS_TEST_TMPDIR/debug.out" ]
+    [ ! -s "$BATS_TEST_TMPDIR/debug.err" ]
+    [[ "$(< "$BATS_TEST_TMPDIR/debug.fd3")" == *'MOCK DEBUG REPORT'* ]]
 }
 
 # ==============================================================================
@@ -1286,6 +1416,21 @@ slow_lock_attempts() {
     rm -f "$custom_log"
 }
 
+@test "config: relative global log -> resolves before commands change directory" {
+    mock_teardown
+    cd "$BATS_TEST_TMPDIR"
+    export BATS_MOCK_STATE_DIR="$BATS_TEST_TMPDIR/relative-log-mocks"
+    export BATS_MOCK_GLOBAL_LOG='calls with spaces.log'
+    mock_setup
+    [ "$BATS_MOCK_GLOBAL_LOG" = "$PWD/calls with spaces.log" ]
+    mock probe '*' true
+    cd "$BATS_MOCK_STATE_DIR"
+    probe value
+    assert_call_sequence 'probe value'
+    [ ! -e "$BATS_MOCK_STATE_DIR/calls with spaces.log" ]
+    cd "$BATS_TEST_TMPDIR"
+}
+
 @test "config: paths -> quotes and expansion characters remain literal" {
     mock_teardown
     export BATS_MOCK_STATE_DIR="$BATS_TEST_TMPDIR/space ' \" \$HOME"
@@ -1314,6 +1459,23 @@ slow_lock_attempts() {
     # Compile cleans it
     mock::jit::compile "dirty_check"
     [ "${_BATS_MOCK_DIRTY_dirty_check}" -eq 0 ]
+}
+
+@test "whitebox: compilation cache -> preserves the wrapper, rules and history" {
+    mock probe '*' 'printf original'
+    run probe before
+    [ "$status" -eq 0 ]
+    [ "$output" = original ]
+    local definition
+    definition=$(declare -f probe)
+    mock::jit::compile probe
+    [ "$(declare -f probe)" = "$definition" ]
+    assert_called_at_index_with_args probe 0 before
+    run probe after
+    [ "$status" -eq 0 ]
+    [ "$output" = original ]
+    assert_called_at_index_with_args probe 1 after
+    assert_called_times probe 2
 }
 
 @test "integrity: multiline arguments do not corrupt call count" {
@@ -1482,6 +1644,42 @@ slow_lock_attempts() {
     printf '0\n' > "$BATS_MOCK_STATE_DIR/probe.next"
     probe
     assert_called_times probe 1
+}
+
+@test "error: missing call counter -> releases the lock without executing the action" {
+    # shellcheck disable=SC2016  # expanded when the action executes
+    mock probe '*' 'printf executed > "$BATS_TEST_TMPDIR/action"'
+    mv "$BATS_MOCK_STATE_DIR/probe.next" "$BATS_MOCK_STATE_DIR/probe.next.saved"
+    run probe value
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Invalid call counter'* ]]
+    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    [ ! -e "$BATS_TEST_TMPDIR/action" ]
+    [ ! -s "$BATS_MOCK_STATE_DIR/probe.log" ]
+    [ ! -s "$BATS_MOCK_GLOBAL_LOG" ]
+    mv "$BATS_MOCK_STATE_DIR/probe.next.saved" "$BATS_MOCK_STATE_DIR/probe.next"
+    probe recovered
+    [ "$(< "$BATS_TEST_TMPDIR/action")" = executed ]
+    assert_called_at_index_with_args probe 0 recovered
+}
+
+@test "error: call directory collision -> preserves state and releases the history lock" {
+    # shellcheck disable=SC2016  # expanded when the action executes
+    mock probe '*' 'printf executed > "$BATS_TEST_TMPDIR/action"'
+    mkdir "$BATS_MOCK_STATE_DIR/probe.calls/0"
+    printf keep > "$BATS_MOCK_STATE_DIR/probe.calls/0/marker"
+    run probe value
+    [ "$status" -eq 1 ]
+    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    [ ! -e "$BATS_TEST_TMPDIR/action" ]
+    [ ! -s "$BATS_MOCK_STATE_DIR/probe.log" ]
+    [ ! -s "$BATS_MOCK_GLOBAL_LOG" ]
+    [ "$(< "$BATS_MOCK_STATE_DIR/probe.next")" = 0 ]
+    [ "$(< "$BATS_MOCK_STATE_DIR/probe.calls/0/marker")" = keep ]
+    mv "$BATS_MOCK_STATE_DIR/probe.calls/0" "$BATS_TEST_TMPDIR/blocked-call"
+    probe recovered
+    [ "$(< "$BATS_TEST_TMPDIR/action")" = executed ]
+    assert_called_at_index_with_args probe 0 recovered
 }
 
 @test "edge: collision -> handles literal '<newline>' string vs physical newline" {
