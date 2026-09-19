@@ -1,0 +1,7 @@
+# Keeps the actions in the workflows current. The library has no other dependencies.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

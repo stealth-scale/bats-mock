@@ -1,0 +1,35 @@
+# Publishes a GitHub release for a version tag, with the matching CHANGELOG.md entry as
+# its notes. The tag is pushed by hand after the changelog entry is on main; see
+# CONTRIBUTING.md. A tag without an entry fails here rather than releasing without notes.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install bats-core
+        run: |
+          git clone --quiet --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          /tmp/bats-core/install.sh "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make check
+      - name: Extract the changelog entry
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## \[/ { p = index($0, "[" v "]") > 0; next } /^\[[^]]+\]: / { p = 0 } p' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no entry for ${version}" >&2
+            exit 1
+          fi
+      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

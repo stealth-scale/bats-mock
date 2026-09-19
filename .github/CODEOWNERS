@@ -1,0 +1,7 @@
+# Every pull request is reviewed by the maintainer. A later line wins over an
+# earlier one, so the catch-all is stated first.
+
+* @stealth-rklopper
+
+# The workflows and the templates decide what runs on every pull request.
+/.github/ @stealth-rklopper
