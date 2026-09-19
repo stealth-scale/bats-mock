@@ -71,4 +71,6 @@ jobs:
           /tmp/bats/install.sh "$HOME/.local"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: bash --version | head -1 && bats --version
-      - run: make test-host
+      # The runner starts steps with SIGPIPE ignored, which changes how a producer such
+      # as `yes` ends. Restore the default so the tests see a normal shell.
+      - run: perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV' make test-host
