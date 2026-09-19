@@ -3,7 +3,8 @@
 ## Getting set up
 
 You need GNU make, [ShellCheck](https://www.shellcheck.net) and Podman or Docker.
-`make test` builds a small image from `tests/Containerfile` with the bash and bats-core
+`make test` pulls `ghcr.io/stealth-scale/bats-test`, the image of the
+[bats-test](https://github.com/stealth-scale/bats-test) repository, at the bash and bats-core
 versions it is given. For `make test-host`, install Bash 4.4 or later and
 [bats-core](https://github.com/bats-core/bats-core) 1.7.0 or later.
 
@@ -17,8 +18,9 @@ make check
 
 ```sh
 make lint       # shellcheck over the loader, the sources and the tests
-make test       # the suite in the test image; BASH_VERSION and BATS_VERSION pick the cell
+make test       # the suite in the bats-test image; BASH_VERSION and BATS_VERSION pick the cell
 make test-host  # the suite with the bash and bats of this machine
+make coverage   # the suite under kcov: a table per file, report in coverage/
 make check      # what CI runs: lint, then test
 ```
 

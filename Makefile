@@ -1,39 +1,45 @@
-# `make help` lists the targets. The tests run in tests/Containerfile: the official
-# bash image at BASH_VERSION with bats-core BATS_VERSION, checkout mounted read-only.
+# `make help` lists the targets. The tests run in ghcr.io/stealth-scale/bats-test, the
+# image of the bats-test repository: bash at BASH_VERSION, bats-core at BATS_VERSION,
+# kcov, with the checkout mounted read-only.
 #
 #   make test
 #   make test BASH_VERSION=4.4 BATS_VERSION=1.7.0
-#   make test TARGET=tests/mock.bats
+#   make test TARGET=tests/NAME.bats
+#   make coverage
 SHELL := bash
 .DEFAULT_GOAL := help
 
 RUNTIME      ?= podman
 BASH_VERSION ?= 5.2
 BATS_VERSION ?= 1.14.0
-IMAGE        ?= bats-mock-test:$(BASH_VERSION)-bats$(BATS_VERSION)
+IMAGE        ?= ghcr.io/stealth-scale/bats-test:bash$(BASH_VERSION)-bats$(BATS_VERSION)
 TARGET       ?= tests/
 BATS_FLAGS   ?= --print-output-on-failure
+COVERAGE_MIN ?= 0
 PREFIX       ?= /usr/local
 LIBDIR        = $(PREFIX)/lib/bats-mock
 
 SOURCES = load.bash $(wildcard src/*.bash)
 TESTS   = $(wildcard tests/*.bats)
 
-# As the calling user, no network, no capabilities. --init lets Ctrl+C stop the run.
-RUN = $(RUNTIME) run --rm --init --network=none --cap-drop=ALL --security-opt=label=disable \
+# As the calling user, no network, no capabilities, checkout read-only. coverage/ is
+# the one writable mount, for kcov's report. The image is its own init: Ctrl+C and
+# `podman stop` end a run, kcov included.
+RUN = $(RUNTIME) run --rm --network=none --cap-drop=ALL --security-opt=label=disable \
       --user $(shell id -u):$(shell id -g) $(if $(filter podman,$(RUNTIME)),--userns=keep-id) \
       --volume "$(CURDIR):/code:ro" --workdir /code
 
-.PHONY: help build test test-host lint check shell install uninstall
+.PHONY: help test coverage test-host lint check shell install uninstall clean
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{ printf "  %-10s %s\n", $$1, $$2 }'
 
-build: ## Build the test image for BASH_VERSION and BATS_VERSION
-	$(RUNTIME) build -q -f tests/Containerfile --build-arg BASH_VERSION=$(BASH_VERSION) --build-arg BATS_VERSION=$(BATS_VERSION) -t $(IMAGE) tests/
+test: ## Run TARGET in the image
+	$(RUN) $(IMAGE) test $(BATS_FLAGS) --recursive $(TARGET)
 
-test: build ## Run TARGET in the container
-	$(RUN) $(IMAGE) bats $(BATS_FLAGS) --recursive $(TARGET)
+coverage: ## Run TARGET under kcov; table per file, report in coverage/, floor COVERAGE_MIN
+	rm -rf coverage && mkdir coverage
+	$(RUN) --volume "$(CURDIR)/coverage:/code/coverage" $(IMAGE) coverage --min $(COVERAGE_MIN) $(COVERAGE_FLAGS) -- $(BATS_FLAGS) --recursive $(TARGET)
 
 test-host: ## Run TARGET with the bats of this machine
 	bats $(BATS_FLAGS) --recursive $(TARGET)
@@ -43,8 +49,8 @@ lint: ## Run shellcheck over the loader, the sources and the tests
 
 check: lint test ## What CI runs
 
-shell: build ## A shell in the test image
-	$(RUN) --interactive --tty --entrypoint bash $(IMAGE)
+shell: ## A shell in the image
+	$(RUN) --interactive --tty $(IMAGE) shell
 
 install: ## Copy the library to $(LIBDIR), for `load` by absolute path
 	install -d $(DESTDIR)$(LIBDIR)/src
@@ -53,3 +59,6 @@ install: ## Copy the library to $(LIBDIR), for `load` by absolute path
 
 uninstall: ## Remove the library from $(LIBDIR)
 	rm -rf $(DESTDIR)$(LIBDIR)
+
+clean: ## Remove the coverage report
+	rm -rf coverage
