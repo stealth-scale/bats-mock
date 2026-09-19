@@ -4,7 +4,7 @@
 
 You need GNU make, [ShellCheck](https://www.shellcheck.net) and Podman or Docker.
 `make test` builds a small image from `tests/Containerfile` with the bash and bats-core
-versions it is given. For `make test-host`, install Bash 4 or later and
+versions it is given. For `make test-host`, install Bash 4.4 or later and
 [bats-core](https://github.com/bats-core/bats-core) 1.7.0 or later.
 
 ```sh
@@ -44,7 +44,7 @@ A release is a tag on `main`.
 2. Commit as `chore: release vX.Y.Z`.
 3. `git tag -s vX.Y.Z -m vX.Y.Z && git push --follow-tags`.
 
-The release workflow runs `make check` on the tag and publishes a GitHub release with the
+The release workflow runs the full CI matrix on the tag and publishes a GitHub release with the
 changelog entry as its notes. A tag without a matching changelog entry fails the workflow.
 
 ## Conventions

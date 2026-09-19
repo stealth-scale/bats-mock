@@ -1,6 +1,6 @@
 #############################################
 #
-# Stealth Mock Framework v3.2.1 (Stream Safe)
+# Stealth Mock Framework
 # ==============================================================================
 # Mocks, call-through spies and interaction assertions for bats-core.
 #
