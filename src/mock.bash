@@ -250,7 +250,7 @@ mock::jit::compile() {
 
         printf -v "$_jit_pat_var" "%s" "${_jit_patterns[$_jit_i]}"
         printf -v "$_jit_act_var" "%s" "${_jit_actions[$_jit_i]}"
-        export "$_jit_pat_var" "$_jit_act_var"
+        export "${_jit_pat_var?}" "${_jit_act_var?}"
     done
     export "${BATS_MOCK_PREFIX}_RULE_COUNT_${_jit_safe_cmd}=$_jit_count"
 
@@ -353,11 +353,11 @@ mock::jit::compile() {
 
     eval "$_jit_func_body"
     if [[ "$_jit_cmd" =~ ^[a-zA-Z0-9_]+$ ]]; then
-        export -f "$_jit_cmd"
+        export -f "${_jit_cmd?}"
     fi
 
     printf -v "$_jit_dirty_var" "0"
-    export "$_jit_dirty_var"
+    export "${_jit_dirty_var?}"
 }
 
 #######################################
@@ -381,7 +381,7 @@ mock::jit::add_rule() {
     local _ar_safe_cmd="${_ar_cmd_name//[^a-zA-Z0-9_]/_}"
     local _ar_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_ar_safe_cmd}"
     printf -v "$_ar_dirty_var" "1"
-    export "$_ar_dirty_var"
+    export "${_ar_dirty_var?}"
 }
 
 # ==============================================================================
@@ -497,6 +497,7 @@ unmock() {
     # Restore original function if backup exists
     local _um_orig_file="${BATS_MOCK_STATE_DIR}/${_um_cmd}.orig"
     if [[ -f "$_um_orig_file" ]]; then
+        # shellcheck source=/dev/null
         source "$_um_orig_file" || true
         rm -f "$_um_orig_file"
     fi
@@ -558,7 +559,8 @@ mock_sequence() {
     shift 2
     local _seq_actions=("$@")
 
-    local _seq_counter_file="${BATS_MOCK_STATE_DIR}/seq_${_seq_cmd}_$(date +%s%N)"
+    local _seq_counter_file
+    _seq_counter_file="${BATS_MOCK_STATE_DIR}/seq_${_seq_cmd}_$(date +%s%N)"
     echo "0" > "$_seq_counter_file"
 
     local _seq_script=""
@@ -645,6 +647,7 @@ mock::history::search() {
 
     while IFS= read -r _search_line; do
         # 1. Literal Match (Prefix '=')
+        # shellcheck disable=SC2053  # the unquoted pattern is the glob contract of the default mode
         if [[ "${_search_pat:0:1}" == "=" ]]; then
             local _search_literal="${_search_safe_pat:1}"
             # Exact string comparison
@@ -908,6 +911,7 @@ assert_called_at_index() {
     # Sanitize pattern for multiline comparison
     local _aci_safe_pattern="${_aci_pattern//$'\n'/<newline>}"
 
+    # shellcheck disable=SC2053  # the unquoted pattern is the glob contract of the default mode
     if [[ "${_aci_pattern:0:1}" == "~" ]]; then
         local _aci_regex="${_aci_safe_pattern:1}"
         if [[ "$_aci_actual_line" =~ $_aci_regex ]]; then return 0; fi
@@ -1122,7 +1126,7 @@ mock_debug() {
              while IFS= read -r -d '' _mpd_pattern && IFS= read -r -d '' _mpd_action; do
                 echo "     Rule $_mpd_idx: pattern '$_mpd_pattern'"
                 if [[ "$_mpd_action" == *$'\n'* ]]; then
-                    echo "$_mpd_action" | sed 's/^/             | /'
+                    printf '%s\n' "             | ${_mpd_action//$'\n'/$'\n'             | }"
                 else
                     echo "             Action: $_mpd_action"
                 fi

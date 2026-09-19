@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+# shellcheck disable=SC2030,SC2031  # every @test is its own process, not a subshell of the file
+
 # ==============================================================================
 # Stealth Mock Framework - Comprehensive Test Suite
 # ==============================================================================
@@ -371,7 +373,8 @@ teardown() {
 
 @test "interaction: subshell nesting -> works inside nested subshells" {
     mock deep "*" "echo 'deep'"
-    result=$( ( echo $(deep) ) )
+    # shellcheck disable=SC2005  # the echo inside a nested subshell is the case under test
+    result=$( ( echo "$(deep)" ) )
     [ "$result" = "deep" ]
 }
 
@@ -878,7 +881,8 @@ teardown() {
 }
 
 @test "system: payload -> handles huge arguments" {
-    local huge_arg=$(printf 'a%.0s' {1..10000})
+    local huge_arg
+    huge_arg=$(printf 'a%.0s' {1..10000})
     mock heavy "*" "echo 'done'"
     run heavy "$huge_arg"
     [ "$status" -eq 0 ]
@@ -913,6 +917,7 @@ teardown() {
 @test "whitebox: dirty flag -> internal flag is set on creation" {
     mock dirty_check "*" "true"
     # mock() compiles immediately, so dirty should be 0
+    # shellcheck disable=SC2154  # set by mock::jit::compile
     [ "${_BATS_MOCK_DIRTY_dirty_check}" -eq 0 ]
 
     # Manually add a rule to trigger dirty state
@@ -999,6 +1004,7 @@ teardown() {
 
     # Direct execution (Unit test style)
     stealth::pkg::install
+    # shellcheck disable=SC2181  # the status is the assertion
     [ "$?" -eq 0 ]
 
     # output capture is manual in direct calls, but we verify exit code 0
@@ -1007,6 +1013,7 @@ teardown() {
 }
 
 @test "namespace: execution -> works in subshells (run) without export" {
+    # shellcheck disable=SC2016  # the action is evaluated by the mock, not here
     mock stealth::ui::header "*" 'echo "HEADER: $1"'
 
     run stealth::ui::header "Welcome"
