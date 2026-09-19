@@ -582,6 +582,25 @@ slow_lock_attempts() {
     [ "$status" -eq 0 ]
 }
 
+@test "whitebox: spy definition -> accepts saved function keyword syntax" {
+    local declaration
+    for declaration in 'function original' 'function original()'; do
+        mock original '*' true
+        # Exercise alternate saved definitions, not declare -f's usual form.
+        # shellcheck disable=SC2016  # evaluated only when the restored function is called
+        printf '%s %s\n' "$declaration" '{ printf "<%s>" "$@"; return 7; }' > "$BATS_MOCK_STATE_DIR/original.orig"
+        mock_spy original
+        run original 'a b' '' tail
+        [ "$status" -eq 7 ]
+        [ "$output" = '<a b><><tail>' ]
+        assert_called_at_index_with_args original 0 'a b' '' tail
+        unmock original
+        run original restored
+        [ "$status" -eq 7 ]
+        [ "$output" = '<restored>' ]
+    done
+}
+
 @test "unmock: basic -> restores original command" {
     hello() { echo "original"; }
     export -f hello

@@ -790,7 +790,7 @@ mock_spy() {
         local _ms_new_def="${_ms_orig_def/$_ms_cmd ()/$_ms_hidden_name ()}"
 
         if [[ "$_ms_new_def" == "$_ms_orig_def" ]]; then
-             _ms_new_def="${_ms_orig_def/function $_ms_cmd/$_ms_hidden_name}"
+             _ms_new_def="${_ms_orig_def/function $_ms_cmd/function $_ms_hidden_name}"
         fi
 
         eval "$_ms_new_def" || return 1
