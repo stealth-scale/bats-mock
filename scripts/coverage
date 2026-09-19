@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#
+# Measures line coverage of src/*.bash under tests/*.bats and fails when the total
+# is under a floor.
+#
+# Usage:
+#   scripts/coverage [MIN_PERCENT]
+#
+# Bash has no coverage tool of its own, so the suite runs with xtrace written to a
+# file, with every trace line stamped with its source file and line number. A source
+# line counts as executable when it is not blank, not a comment, not a lone
+# keyword or brace, not a function header, and not the inside of a multi-line
+# string or a continued line. That is a heuristic, so read a line reported as
+# missed before you act on it.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+min="${1:-0}"
+bats="${BATS:-bats}"
+
+trace="$(mktemp)"
+env_file="$(mktemp)"
+trap 'rm -f "$trace" "$env_file"' EXIT
+
+cat > "$env_file" <<ENV
+exec {BASH_XTRACEFD}>>"$trace"
+PS4='+COV \${BASH_SOURCE}:\${LINENO} '
+set -x
+ENV
+
+if ! BASH_ENV="$env_file" "$bats" tests/*.bats > /dev/null 2>&1; then
+    echo "coverage: the test suite failed. Run 'make test' first." >&2
+    exit 1
+fi
+
+total_lines=0
+total_hit=0
+
+for src in src/*.bash; do
+    hits="$(grep -o "${src}:[0-9]*" "$trace" | cut -d: -f2 | sort -un || true)"
+    # Executable lines, then the subset of those that the trace never reached.
+    report="$(awk -v hits="$hits" '
+        BEGIN { split(hits, h, "\n"); for (i in h) if (h[i] != "") hit[h[i]] = 1 }
+        {
+            line = $0
+            sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+            if (in_string) { if (gsub(/"/, "\"", line) % 2 == 1) in_string = 0; next }
+            if (continued) { continued = (line ~ /\\$/); next }
+            if (line == "" || line ~ /^#/) next
+            if (line ~ /^(fi|done|else|esac|;;|\{|\}|then|do)$/) next
+            if (line ~ /^[A-Za-z_][A-Za-z0-9_:]*\(\)[ \t]*\{?$/) next
+            executable++
+            if (NR in hit) covered++; else missed = missed sprintf("  %s:%d: %s\n", FILENAME, NR, line)
+            if (gsub(/"/, "\"", line) % 2 == 1) in_string = 1
+            continued = (line ~ /\\$/)
+        }
+        END { printf "%d %d\n%s", executable, covered, missed }
+    ' "$src")"
+    read -r lines hit <<< "${report%%$'\n'*}"
+    missed=""
+    [[ "$report" == *$'\n'* ]] && missed="${report#*$'\n'}"
+    printf '%s: %d/%d lines\n' "$src" "$hit" "$lines"
+    [[ -n "$missed" ]] && printf '%s' "$missed"
+    total_lines=$((total_lines + lines))
+    total_hit=$((total_hit + hit))
+done
+
+percent=$((100 * total_hit / total_lines))
+printf 'total: %d/%d lines, %d%% (floor %d%%)\n' "$total_hit" "$total_lines" "$percent" "$min"
+(( percent >= min ))
