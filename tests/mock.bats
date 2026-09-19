@@ -146,6 +146,85 @@ run_with_timeout() {
     [ ! -d "$BATS_MOCK_STATE_DIR" ]
 }
 
+@test "core: setup -> repeated setup retains rules and call history" {
+    mock probe '*' true
+    probe
+    mock_setup
+    assert_called_times probe 1
+    assert_call_sequence probe
+}
+
+@test "core: teardown -> restores functions and removes generated helpers" {
+    # shellcheck disable=SC2329  # restored, then invoked through run
+    original() { echo original; }
+    mock_spy original
+    mock temporary '*' true
+    mock_teardown
+    run original
+    [ "$status" -eq 0 ]
+    [ "$output" = original ]
+    run -1 declare -F temporary
+    run -1 declare -F _BATS_MOCK_ACTION_original
+    run -1 declare -F _BATS_MOCK_SPY_ORIGINAL_original
+    mock_teardown
+}
+
+@test "core: ownership -> refuses an existing directory and preserves its files" {
+    mock_teardown
+    export BATS_MOCK_STATE_DIR="$BATS_TEST_TMPDIR/user-data"
+    mkdir "$BATS_MOCK_STATE_DIR"
+    printf keep > "$BATS_MOCK_STATE_DIR/important"
+    run mock_setup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'new, dedicated directory'* ]]
+    mock_teardown
+    [ "$(< "$BATS_MOCK_STATE_DIR/important")" = keep ]
+}
+
+@test "core: ownership -> changing the configured path cannot redirect cleanup" {
+    local owned_dir="$BATS_MOCK_STATE_DIR"
+    export BATS_MOCK_STATE_DIR="$BATS_TEST_TMPDIR"
+    printf keep > "$BATS_TEST_TMPDIR/important"
+    run mock_teardown
+    [ "$status" -eq 1 ]
+    [ "$(< "$BATS_TEST_TMPDIR/important")" = keep ]
+    [ -d "$owned_dir" ]
+    export BATS_MOCK_STATE_DIR="$owned_dir"
+}
+
+@test "core: ownership -> refuses a replaced directory symlink" {
+    local owned_dir="$BATS_MOCK_STATE_DIR"
+    mv "$owned_dir" "$owned_dir.saved"
+    ln -s "$BATS_TEST_TMPDIR" "$owned_dir"
+    run mock_teardown
+    [ "$status" -eq 1 ]
+    [ -d "$BATS_TEST_TMPDIR" ]
+    rm "$owned_dir"
+    mv "$owned_dir.saved" "$owned_dir"
+}
+
+@test "core: ownership -> refuses a changed session marker" {
+    local marker
+    marker=$(< "$BATS_MOCK_STATE_DIR/.owner")
+    printf other > "$BATS_MOCK_STATE_DIR/.owner"
+    run mock_teardown
+    [ "$status" -eq 1 ]
+    [ -d "$BATS_MOCK_STATE_DIR" ]
+    printf '%s\n' "$marker" > "$BATS_MOCK_STATE_DIR/.owner"
+}
+
+@test "core: session -> registration requires setup and teardown permits a fresh session" {
+    mock_teardown
+    run mock probe '*' true
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'call mock_setup first'* ]]
+    mock_setup
+    mock probe '*' true
+    assert_called_times probe 0
+    probe
+    assert_called_times probe 1
+}
+
 # ==============================================================================
 # GROUP 02: ARGUMENT MATCHING - BASIC
 # ==============================================================================
@@ -724,6 +803,47 @@ run_with_timeout() {
     assert_called_times "cmd" 0
 }
 
+@test "assertions: registration -> negative and zero-count checks reject unknown names" {
+    local assertion
+    for assertion in refute_called refute_called_with refute_called_exact refute_called_with_args; do
+        run "$assertion" unregistered_typo
+        [ "$status" -eq 1 ]
+        [[ "$output" == *'Unregistered Mock'* ]]
+    done
+    run assert_called_times unregistered_typo 0
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Unregistered Mock'* ]]
+}
+
+@test "assertions: registration -> all call assertions reject an unmocked command" {
+    mock probe '*' true
+    probe
+    unmock probe
+    local assertion
+    for assertion in assert_called assert_called_with assert_called_once_with assert_called_exact assert_called_with_args assert_stdin_equals; do
+        run "$assertion" probe
+        [ "$status" -eq 1 ]
+        [[ "$output" == *'Unregistered Mock'* ]]
+    done
+    for assertion in assert_called_at_index assert_called_at_index_with_args assert_stdin_at_index assert_stdin_complete; do
+        run "$assertion" probe 0
+        [ "$status" -eq 1 ]
+        [[ "$output" == *'Unregistered Mock'* ]]
+    done
+}
+
+@test "assertions: corrupt history -> negative checks fail instead of treating it as no match" {
+    mock probe '*' true
+    probe recorded
+    printf unterminated > "$BATS_MOCK_STATE_DIR/probe.calls/0/args"
+    local assertion
+    for assertion in refute_called_with refute_called_exact; do
+        run "$assertion" probe missing
+        [ "$status" -eq 1 ]
+        [[ "$output" == *'History Read Failure'* ]]
+    done
+}
+
 @test "assert_called_times: decimal -> normalizes zeroes and rejects expressions" {
     mock probe "*" true
     local i
@@ -912,12 +1032,29 @@ run_with_timeout() {
     assert_call_sequence
 }
 
+@test "assert_call_sequence: command boundary -> rejects a longer command name" {
+    mock api_v2 '*' true
+    api_v2
+    run assert_call_sequence api
+    [ "$status" -eq 1 ]
+    assert_call_sequence api_v2
+}
+
+@test "assert_call_sequence: argument boundary -> rejects a partial argument" {
+    mock git '*' true
+    git fetcher
+    run assert_call_sequence 'git fetch'
+    [ "$status" -eq 1 ]
+    git fetch origin
+    assert_call_sequence 'git fetch'
+}
+
 # ==============================================================================
 # GROUP 12: ASSERTIONS - FEEDBACK & DEBUGGING
 # ==============================================================================
 
 @test "feedback: assert_called -> message contains command name" {
-    mock ghost "*" "true"
+    mock phantom "*" "true"
 
     run assert_called "phantom"
     [ "$status" -eq 1 ]
@@ -933,6 +1070,40 @@ run_with_timeout() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"Argument Mismatch"* ]]
     [[ "$output" == *"fetch"* ]] # History should show the actual call
+}
+
+@test "feedback: history -> limits displayed calls and reports omitted entries" {
+    mock probe '*' true
+    local i
+    for ((i=1; i<=12; i++)); do probe "entry-$i"; done
+    run assert_called_with probe missing
+    [ "$status" -eq 1 ]
+    [[ "$output" == *entry-1* ]]
+    [[ "$output" == *entry-10* ]]
+    [[ "$output" != *entry-11* ]]
+    [[ "$output" == *'and 2 more calls'* ]]
+}
+
+@test "feedback: history -> truncates large entries without changing assertions" {
+    mock probe '*' true
+    local payload
+    printf -v payload '%1000s' ''
+    payload=${payload// /x}
+    probe "$payload"
+    assert_called_with_args probe "$payload"
+    run assert_called_with probe missing
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'...'* ]]
+    [[ "$output" != *"$payload"* ]]
+}
+
+@test "feedback: argv -> shows argument boundaries and zero-based index expectations" {
+    mock probe '*' true
+    probe 'a b' ''
+    run assert_called_at_index_with_args probe 0 a b
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Index 0 with exactly 2 arguments'* ]]
+    [[ "$output" == *"2 arguments: a\\ b ''"* ]]
 }
 
 @test "debug: mock_debug -> runs without error" {
@@ -1050,8 +1221,10 @@ run_with_timeout() {
 }
 
 @test "config: state dir -> respects BATS_MOCK_STATE_DIR" {
-    local custom_dir="${BATS_TMPDIR}/custom_mocks"
+    mock_teardown
+    local custom_dir="${BATS_TEST_TMPDIR}/custom_mocks"
     export BATS_MOCK_STATE_DIR="$custom_dir"
+    export BATS_MOCK_GLOBAL_LOG="$custom_dir/global.log"
 
     mock_setup
     mock git "*" "true"
@@ -1060,7 +1233,7 @@ run_with_timeout() {
     [ -d "$custom_dir" ]
     [ -f "${custom_dir}/git.log" ]
 
-    rm -rf "$custom_dir"
+    mock_teardown
 }
 
 @test "config: global log -> respects BATS_MOCK_GLOBAL_LOG" {
@@ -1076,6 +1249,7 @@ run_with_timeout() {
 }
 
 @test "config: paths -> quotes and expansion characters remain literal" {
+    mock_teardown
     export BATS_MOCK_STATE_DIR="$BATS_TEST_TMPDIR/space ' \" \$HOME"
     export BATS_MOCK_GLOBAL_LOG="$BATS_MOCK_STATE_DIR/global.log"
     mock_setup
@@ -1137,7 +1311,7 @@ run_with_timeout() {
 
 @test "error: API arguments -> rejects missing and extra inputs" {
     local function_name
-    for function_name in mock mock_spy mock_sequence unmock mock_strict_mode assert_called_times assert_called_at_index assert_stdin_at_index; do
+    for function_name in mock mock_spy mock_sequence unmock mock_strict_mode assert_called_times assert_called_at_index assert_stdin_at_index assert_called refute_called assert_called_with assert_called_once_with refute_called_with assert_called_exact refute_called_exact assert_called_with_args refute_called_with_args assert_called_at_index_with_args assert_stdin_equals assert_stdin_complete assert_args_contain; do
         run "$function_name"
         [ "$status" -eq 1 ]
         [[ "$output" == *"MOCK ERROR"* ]]
@@ -1149,17 +1323,28 @@ run_with_timeout() {
     [ "$status" -eq 1 ]
 }
 
-@test "error: invalid regex -> regex syntax error returns status 2 (bash default)" {
-    mock_strict_mode 0
+@test "error: invalid regex -> registration fails without changing existing rules" {
+    mock probe '*' 'echo original'
+    run mock probe '~[' true
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Invalid regular expression'* ]]
+    run probe
+    [ "$output" = original ]
+    run mock_sequence probe '~[' true
+    [ "$status" -eq 1 ]
+}
 
-    # '[' is an invalid regex (unclosed bracket)
-    mock grep "~[" "true"
-
-    run grep "foo"
-    # Bash [[ =~ ]] usually returns 2 on regex error
-    if [[ "${BASH_VERSINFO[0]}" -ge 3 ]]; then
-         [ "$status" -eq 2 ] || [ "$status" -eq 0 ]
-    fi
+@test "error: invalid regex -> positive and negative assertions reject malformed patterns" {
+    mock probe '*' true
+    probe
+    local assertion
+    for assertion in assert_called_with assert_called_once_with refute_called_with; do
+        run "$assertion" probe '~['
+        [ "$status" -eq 1 ]
+        [[ "$output" == *'Invalid regular expression'* ]]
+    done
+    run assert_called_at_index probe 0 '~['
+    [ "$status" -eq 1 ]
 }
 
 @test "error: invalid action -> syntax error in action returns failure" {
@@ -1184,6 +1369,29 @@ run_with_timeout() {
     [[ "$output" == *"Lock timeout"* ]]
 
     rmdir "${counter_file}.lock"
+}
+
+@test "error: history lock -> times out before executing an action" {
+    mock probe '*' 'echo should-not-run'
+    mkdir "$BATS_MOCK_STATE_DIR/history.lock"
+    run_with_timeout 8 probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'call history lock'* ]]
+    [[ "$output" != *should-not-run* ]]
+    assert_called_times probe 0
+    rmdir "$BATS_MOCK_STATE_DIR/history.lock"
+}
+
+@test "error: call counter -> rejects malformed state and releases the history lock" {
+    mock probe '*' true
+    printf '1+1\n' > "$BATS_MOCK_STATE_DIR/probe.next"
+    run probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Invalid call counter'* ]]
+    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    printf '0\n' > "$BATS_MOCK_STATE_DIR/probe.next"
+    probe
+    assert_called_times probe 1
 }
 
 @test "edge: collision -> handles literal '<newline>' string vs physical newline" {
@@ -1258,8 +1466,10 @@ run_with_timeout() {
 
     # Verify restoration
     run stealth::sys::fs::copy "test" "dir"
-    refute_called_with "stealth::sys::fs::copy" "test" "dir"
     [ "$output" = "real cp test dir" ]
+    run refute_called_with "stealth::sys::fs::copy" "test" "dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Unregistered Mock'* ]]
 }
 
 @test "namespace: unmock -> restores original namespaced function" {
@@ -1373,6 +1583,74 @@ run_with_timeout() {
     [ "$status" -eq 1 ]
 }
 
+@test "assert_called_with_args: boundaries -> distinguishes one argument from two" {
+    mock probe '*' true
+    probe 'a b'
+    assert_called_with_args probe 'a b'
+    refute_called_with_args probe a b
+    run assert_called_with_args probe a b
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Exactly 2 arguments'* ]]
+    # The existing joined-text API deliberately keeps its contract.
+    assert_called_exact probe a b
+}
+
+@test "assert_called_with_args: empty -> distinguishes no arguments from an empty argument" {
+    mock probe '*' true
+    probe
+    assert_called_with_args probe
+    refute_called_with_args probe ''
+    probe ''
+    assert_called_at_index_with_args probe 0
+    assert_called_at_index_with_args probe 1 ''
+    run assert_called_at_index_with_args probe 0 ''
+    [ "$status" -eq 1 ]
+    run assert_called_at_index_with_args probe 1
+    [ "$status" -eq 1 ]
+}
+
+@test "assert_called_with_args: data -> preserves empty fields, control characters and shell syntax" {
+    mock probe '*' true
+    # shellcheck disable=SC2016  # these strings are data, never executable code
+    local args=( '' 'a b' '' $'line\n\tend\n' '<newline>' '$(printf unexpected)' '*[?]' 'héllo' 42 )
+    probe "${args[@]}"
+    assert_called_with_args probe "${args[@]}"
+    assert_called_at_index_with_args probe 000 "${args[@]}"
+    run refute_called_with_args probe "${args[@]}"
+    [ "$status" -eq 1 ]
+    refute_called_with_args probe "${args[@]}" ''
+}
+
+@test "assert_called_with_args: child shell -> retains lossless call records" {
+    mock probe '*' true
+    run bash -c 'probe "a b" "" 123'
+    [ "$status" -eq 0 ]
+    assert_called_with_args probe 'a b' '' 123
+    refute_called_with_args probe a b '' 123
+}
+
+@test "assert_called_with_args: history -> searches all calls and handles an empty history" {
+    mock probe '*' true
+    run assert_called_with_args probe
+    [ "$status" -eq 1 ]
+    refute_called_with_args probe
+    probe first
+    probe second
+    assert_called_with_args probe first
+    assert_called_with_args probe second
+}
+
+@test "assert_called_at_index_with_args: index -> rejects invalid and out-of-range values" {
+    mock probe '*' true
+    probe first
+    local index
+    for index in -1 '0+0' 1 18446744073709551616; do
+        run assert_called_at_index_with_args probe "$index" first
+        [ "$status" -eq 1 ]
+        [[ "$output" != *'unbound variable'* ]]
+    done
+}
+
 # ==============================================================================
 # GROUP 18: EDGE CASES - CONTROL CHARACTERS & LITERALS
 # ==============================================================================
@@ -1387,6 +1665,20 @@ run_with_timeout() {
     # This should FAIL because the mock received a byte, not the text "\n"
     run assert_called_exact "logger" "Line 1\nLine 2"
     [ "$status" -eq 1 ]
+}
+
+@test "edge: marker -> literal newline marker never matches a physical newline" {
+    mock probe '*' true
+    probe '<newline>'
+    assert_called_exact probe '<newline>'
+    refute_called_exact probe $'\n'
+    refute_called_with probe $'\n'
+    run assert_called_at_index probe 0 $'\n'
+    [ "$status" -eq 1 ]
+    probe $'\n'
+    assert_called_exact probe $'\n'
+    assert_called_at_index probe 1 $'\n'
+    assert_args_contain probe $'\n'
 }
 
 @test "edge: collision -> literal '\\t' string does NOT match actual tab byte" {
@@ -1545,6 +1837,73 @@ run_with_timeout() {
     [ "$output" = payload ]
     assert_stdin_equals probe payload
     refute_called cat
+}
+
+@test "stdin: marker -> literal newline marker stays distinct from physical newlines" {
+    mock probe '*' 'command cat >/dev/null'
+    printf '%s' '<newline>' | probe
+    assert_stdin_equals probe '<newline>'
+    run assert_stdin_equals probe $'\n'
+    [ "$status" -eq 1 ]
+    run assert_stdin_at_index probe 0 $'\n'
+    [ "$status" -eq 1 ]
+    printf '\n' | probe
+    assert_stdin_at_index probe 1 $'\n'
+}
+
+@test "stdin: concurrent completion -> argument and stdin indexes refer to the same call" {
+    # shellcheck disable=SC2016  # expanded when the mock action runs
+    mock probe '*' '
+        command cat >/dev/null
+        if [[ $1 == first ]]; then
+            : > "$BATS_TEST_TMPDIR/first-started"
+            while [[ ! -f "$BATS_TEST_TMPDIR/release-first" ]]; do command sleep 0.01; done
+        fi
+    '
+    # shellcheck disable=SC2016  # expanded in the child shell
+    run_with_timeout 5 bash -c '
+        printf first-input | probe first &
+        first_pid=$!
+        while [[ ! -f "$BATS_TEST_TMPDIR/first-started" ]]; do sleep 0.01; done
+        printf second-input | probe second
+        : > "$BATS_TEST_TMPDIR/release-first"
+        wait "$first_pid"
+    '
+    [ "$status" -eq 0 ]
+    assert_called_at_index_with_args probe 0 first
+    assert_called_at_index_with_args probe 1 second
+    assert_stdin_at_index probe 0 first-input
+    assert_stdin_at_index probe 1 second-input
+    assert_stdin_complete probe 0
+    assert_stdin_complete probe 1
+}
+
+@test "stdin: complete -> records EOF after the action consumes the stream" {
+    mock probe '*' 'command cat >/dev/null'
+    printf 'payload\n\n' | probe
+    assert_stdin_equals probe $'payload\n\n'
+    assert_stdin_complete probe 000
+}
+
+@test "stdin: partial -> bounded capture does not claim to have reached EOF" {
+    mock probe '*' true
+    run_with_timeout 5 bash -c 'yes payload | probe'
+    [ "$status" -eq 0 ]
+    run assert_stdin_complete probe 0
+    [ "$status" -eq 1 ]
+    [[ "$output" == *partial* ]]
+}
+
+@test "stdin: unavailable -> unmatched calls and missing indexes are not complete" {
+    mock probe yes true
+    run -127 probe no
+    run assert_stdin_complete probe 0
+    [ "$status" -eq 1 ]
+    [[ "$output" == *unavailable* ]]
+    run assert_stdin_complete probe 1
+    [ "$status" -eq 1 ]
+    run assert_stdin_complete probe '0+0'
+    [ "$status" -eq 1 ]
 }
 
 # ==============================================================================
