@@ -6,6 +6,8 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-20
+
 ### Changed
 
 - Stdin capture is off unless a mock is registered with `-stdin`. `mock`, `mock_spy` and
@@ -84,6 +86,7 @@ Compatibility changes for users of earlier untagged revisions:
 - Lock timeouts account for command execution and scheduling overhead, including on macOS;
   stdin-log timeouts remove the temporary capture file.
 
-[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.0.1...main
+[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.1.0...main
+[1.1.0]: https://github.com/stealth-scale/bats-mock/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/stealth-scale/bats-mock/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/stealth-scale/bats-mock/releases/tag/v1.0.0
