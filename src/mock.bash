@@ -43,6 +43,11 @@ if [[ "${BATS_MOCK_PREFIX:-}" != "_BATS_MOCK" ]]; then
     readonly BATS_MOCK_PREFIX="_BATS_MOCK"
 fi
 
+# Commands registered with -stdin. Capturing stdin costs a temporary file, a
+# tee child and a drain on every call, so it is off unless a test asks for it.
+# BATS_MOCK_CAPTURE_STDIN=1 restores the earlier behaviour for every mock.
+declare -gA _BATS_MOCK_CAPTURE=()
+
 # ==============================================================================
 # INTERNAL UTILITIES
 # ==============================================================================
@@ -248,7 +253,6 @@ mock::internal::sanitize_ref() {
     fi
     local _sr_v="$_sr_in"
     if [[ "$_sr_v" == *[!a-zA-Z0-9_]* ]]; then
-        # The reserved prefix separates encoded names from ordinary identifiers.
         _sr_v="${_sr_v//_/_u}"
         _sr_v="${_sr_v//./_d}"
         _sr_v="${_sr_v//:/_c}"
@@ -257,6 +261,38 @@ mock::internal::sanitize_ref() {
     fi
     _BATS_MOCK_SAFE["$_sr_in"]="$_sr_v"
     _sr_out="$_sr_v"
+}
+
+#######################################
+# Strips leading options shared by mock, mock_spy and mock_sequence.
+# Sets _BATS_MOCK_OPT_STDIN and _BATS_MOCK_OPT_SHIFT for the caller.
+#
+# Arguments:
+#    @ - The caller's arguments, unmodified.
+# Returns:
+#    0 - Options parsed.
+#    1 - Unknown option.
+#######################################
+mock::internal::parse_opts() {
+    _BATS_MOCK_OPT_STDIN=0
+    _BATS_MOCK_OPT_SHIFT=0
+    while (( $# > 0 )); do
+        case "$1" in
+            -stdin|--stdin)
+                _BATS_MOCK_OPT_STDIN=1
+                ((_BATS_MOCK_OPT_SHIFT+=1))
+                shift
+                ;;
+            --)
+                ((_BATS_MOCK_OPT_SHIFT+=1))
+                return 0
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
+    return 0
 }
 
 #######################################
@@ -351,6 +387,12 @@ mock::jit::compile() {
         return 0
     fi
 
+    # Per-command flag wins; BATS_MOCK_CAPTURE_STDIN=1 turns capture on globally.
+    local _jit_capture=0
+    if [[ "${BATS_MOCK_CAPTURE_STDIN:-0}" == 1 || -n "${_BATS_MOCK_CAPTURE[$_jit_cmd]:-}" ]]; then
+        _jit_capture=1
+    fi
+
     local _jit_state_dir _jit_global_log
     printf -v _jit_state_dir '%q' "$BATS_MOCK_STATE_DIR"
     printf -v _jit_global_log '%q' "$BATS_MOCK_GLOBAL_LOG"
@@ -416,30 +458,12 @@ mock::jit::compile() {
         fi
     "
 
-    # 2. Matching Logic (LIFO)
-    # Uses process substitution < <(tee) to stream stdin to the action
-    # while capturing it, ensuring strict side-effect preservation.
-    _jit_func_body+="
-        local i
-        local count=\${${BATS_MOCK_PREFIX}_RULE_COUNT_${_jit_safe_cmd}:-0}
-        local return_code=0
-        local executed=0
-        local _mock_stdin_state=unavailable
-
-        for ((i=count-1; i>=0; i--)); do
-            local pat_var=\"${BATS_MOCK_PREFIX}_RULE_${_jit_safe_cmd}_\${i}_PAT\"
-            local act_var=\"${BATS_MOCK_PREFIX}_RULE_${_jit_safe_cmd}_\${i}_ACT\"
-            local pattern=\"\${!pat_var}\"
-            local matched=0
-
-            if [[ \"\${pattern:0:1}\" == \"~\" ]]; then
-                local regex=\"\${pattern:1}\"
-                if [[ \"\$args\" =~ \$regex ]]; then matched=1; fi
-            elif [[ \"\$args\" == \$pattern ]]; then
-                matched=1
-            fi
-
-            if [[ \"\$matched\" -eq 1 ]]; then
+    # The capture path costs a temp file, a tee child and a drain on every
+    # call. Compile it in only for mocks registered with -stdin.
+    local _jit_io_branch _jit_post_block _jit_initial_state
+    if [[ "$_jit_capture" == 1 ]]; then
+        _jit_initial_state=unavailable
+        _jit_io_branch="            if [[ \"\$matched\" -eq 1 ]]; then
                 if [[ ! -t 0 ]]; then
                     stdin_tmp=\$(command mktemp \"\$_mock_state_dir/${_jit_cmd}.stdin.tmp.XXXXXXXX\") || return 1
                     # Exec makes the saved PID the capture process, not a shell that
@@ -477,21 +501,8 @@ mock::jit::compile() {
                     else
                         return_code=\$?
                     fi
-                fi
-                executed=1
-                break
-            fi
-        done
-
-        # 3. Strict Mode & Post-Execution Logging
-        if [[ \"\$executed\" -eq 0 ]]; then
-             if [[ \"\${BATS_MOCK_STRICT:-0}\" -eq 1 ]]; then
-                echo \"MOCK ERROR: '${_jit_cmd}' called with unexpected args: '\$args'\" >&2
-                return_code=127
-             fi
-        fi
-
-        # Serialize complete records, including large records that require more
+                fi"
+        _jit_post_block="        # Serialize complete records, including large records that require more
         # than one write. A stale lock must fail instead of hanging the caller.
         local stdin_lock=\"\$_mock_state_dir/${_jit_cmd}.stdin.log.lock\"
         local _mock_stdin_deadline=\$((SECONDS + 5))
@@ -525,7 +536,61 @@ mock::jit::compile() {
         fi
         builtin printf '%s\\n' \"\$_mock_stdin_state\" > \"\$_mock_call_dir/capture\" || log_status=\$?
         builtin printf '%s\\n' \"\$return_code\" > \"\$_mock_call_dir/status\" || log_status=\$?
-        command rmdir -- \"\$stdin_lock\" || log_status=\$?
+        command rmdir -- \"\$stdin_lock\" || log_status=\$?"
+    else
+        _jit_initial_state=disabled
+        _jit_io_branch="            if [[ \"\$matched\" -eq 1 ]]; then
+                if ${_jit_action_func} \"\$@\"; then
+                    return_code=0
+                else
+                    return_code=\$?
+                fi"
+        _jit_post_block="        local log_status=0
+        # Nothing was captured, so a single small append needs no lock.
+        builtin printf '\n' >> \"\$_mock_state_dir/${_jit_cmd}.stdin.log\" || log_status=\$?
+        : > \"\$_mock_call_dir/stdin\" || log_status=\$?
+        builtin printf '%s\\n' \"\$_mock_stdin_state\" > \"\$_mock_call_dir/capture\" || log_status=\$?
+        builtin printf '%s\\n' \"\$return_code\" > \"\$_mock_call_dir/status\" || log_status=\$?"
+    fi
+
+    # 2. Matching Logic (LIFO)
+    # Uses process substitution < <(tee) to stream stdin to the action
+    # while capturing it, ensuring strict side-effect preservation.
+    _jit_func_body+="
+        local i
+        local count=\${${BATS_MOCK_PREFIX}_RULE_COUNT_${_jit_safe_cmd}:-0}
+        local return_code=0
+        local executed=0
+        local _mock_stdin_state=${_jit_initial_state}
+
+        for ((i=count-1; i>=0; i--)); do
+            local pat_var=\"${BATS_MOCK_PREFIX}_RULE_${_jit_safe_cmd}_\${i}_PAT\"
+            local act_var=\"${BATS_MOCK_PREFIX}_RULE_${_jit_safe_cmd}_\${i}_ACT\"
+            local pattern=\"\${!pat_var}\"
+            local matched=0
+
+            if [[ \"\${pattern:0:1}\" == \"~\" ]]; then
+                local regex=\"\${pattern:1}\"
+                if [[ \"\$args\" =~ \$regex ]]; then matched=1; fi
+            elif [[ \"\$args\" == \$pattern ]]; then
+                matched=1
+            fi
+
+${_jit_io_branch}
+                executed=1
+                break
+            fi
+        done
+
+        # 3. Strict Mode & Post-Execution Logging
+        if [[ \"\$executed\" -eq 0 ]]; then
+             if [[ \"\${BATS_MOCK_STRICT:-0}\" -eq 1 ]]; then
+                echo \"MOCK ERROR: '${_jit_cmd}' called with unexpected args: '\$args'\" >&2
+                return_code=127
+             fi
+        fi
+
+${_jit_post_block}
         (( log_status == 0 )) || return \$log_status
 
         return \$return_code
@@ -614,6 +679,7 @@ mock_setup() {
     if [[ "$BATS_MOCK_GLOBAL_LOG" != /* ]]; then
         export BATS_MOCK_GLOBAL_LOG="$PWD/$BATS_MOCK_GLOBAL_LOG"
     fi
+    declare -gA _BATS_MOCK_CAPTURE=()
     declare -gA _BATS_MOCK_SAFE=()
     export _BATS_MOCK_SESSION_DIR="$_setup_dir"
     export _BATS_MOCK_SESSION_CONFIG="$BATS_MOCK_STATE_DIR"
@@ -688,11 +754,14 @@ mock_teardown() {
 #    mock grep "~^error.*" "return 1"
 #######################################
 mock() {
+    mock::internal::parse_opts "$@" || return 1
+    shift "$_BATS_MOCK_OPT_SHIFT"
+    local -i _m_stdin="$_BATS_MOCK_OPT_STDIN"
     local _m_cmd="${1:-}"
     local _m_pat="${2-*}"
     local _m_act="${3-true}"
     if (( $# < 1 || $# > 3 )); then
-        printf '%s\n' 'MOCK ERROR: Usage: mock COMMAND [PATTERN] [ACTION]' >&2
+        printf '%s\n' 'MOCK ERROR: Usage: mock [-stdin] [--] COMMAND [PATTERN] [ACTION]' >&2
         return 1
     fi
     mock::internal::validate_name "$_m_cmd" || return 1
@@ -713,6 +782,15 @@ mock() {
         else
              command rm -f -- "$_m_orig_file"
         fi
+    fi
+
+    if (( _m_stdin == 1 )) && [[ -z "${_BATS_MOCK_CAPTURE[$_m_cmd]:-}" ]]; then
+        # The capture path is compiled in, so turning it on needs a new body.
+        local _m_safe_cmd
+        mock::internal::sanitize_ref _m_safe_cmd "$_m_cmd"
+        _BATS_MOCK_CAPTURE["$_m_cmd"]=1
+        printf -v "${BATS_MOCK_PREFIX}_DIRTY_${_m_safe_cmd}" "1"
+        export "${BATS_MOCK_PREFIX}_DIRTY_${_m_safe_cmd}"
     fi
 
     mock::jit::add_rule "$_m_cmd" "$_m_pat" "$_m_act" || return 1
@@ -753,6 +831,8 @@ unmock() {
     unset "$_um_count_var"
     unset "${BATS_MOCK_PREFIX}_DIRTY_${_um_safe_cmd}"
     unset "${BATS_MOCK_PREFIX}_BUILT_${_um_safe_cmd}"
+    unset '_BATS_MOCK_CAPTURE[$_um_cmd]'
+
     unset -f "${BATS_MOCK_PREFIX}_SPY_ORIGINAL_${_um_safe_cmd}"
     unset -f "${BATS_MOCK_PREFIX}_ACTION_${_um_safe_cmd}"
 
@@ -782,13 +862,19 @@ unmock() {
 #    mock_spy curl
 #######################################
 mock_spy() {
+    mock::internal::parse_opts "$@" || return 1
+    shift "$_BATS_MOCK_OPT_SHIFT"
+    local -i _ms_stdin="$_BATS_MOCK_OPT_STDIN"
     local _ms_cmd="${1:-}"
     if (( $# != 1 )); then
-        printf '%s\n' 'MOCK ERROR: Usage: mock_spy COMMAND' >&2
+        printf '%s\n' 'MOCK ERROR: Usage: mock_spy [-stdin] [--] COMMAND' >&2
         return 1
     fi
     mock::internal::validate_name "$_ms_cmd" || return 1
     mock::internal::require_session || return 1
+    if (( _ms_stdin == 1 )); then
+        _BATS_MOCK_CAPTURE["$_ms_cmd"]=1
+    fi
 
     local _ms_orig_def=""
     # Keep existing history, but never save a generated wrapper as the original.
@@ -833,8 +919,11 @@ mock_spy() {
 #    mock_sequence seq_cmd "*" "echo 1" "echo 2" "echo 3"
 #######################################
 mock_sequence() {
+    mock::internal::parse_opts "$@" || return 1
+    shift "$_BATS_MOCK_OPT_SHIFT"
+    local -i _seq_stdin="$_BATS_MOCK_OPT_STDIN"
     if (( $# < 3 )); then
-        printf '%s\n' 'MOCK ERROR: Usage: mock_sequence COMMAND PATTERN ACTION...' >&2
+        printf '%s\n' 'MOCK ERROR: Usage: mock_sequence [-stdin] [--] COMMAND PATTERN ACTION...' >&2
         return 1
     fi
     local _seq_cmd="$1"
@@ -842,6 +931,9 @@ mock_sequence() {
     mock::internal::validate_name "$_seq_cmd" || return 1
     mock::internal::validate_pattern "$_seq_pat" || return 1
     mock::internal::require_session || return 1
+    if (( _seq_stdin == 1 )); then
+        _BATS_MOCK_CAPTURE["$_seq_cmd"]=1
+    fi
     shift 2
     local _seq_actions=("$@")
 
@@ -1323,6 +1415,20 @@ assert_called_at_index() {
 }
 
 #######################################
+# A stdin assertion is meaningless unless the mock was registered to capture.
+# Saying so beats comparing against an empty record.
+#######################################
+mock::internal::require_capture() {
+    local _rq_cmd="$1"
+    if [[ "${BATS_MOCK_CAPTURE_STDIN:-0}" == 1 || -n "${_BATS_MOCK_CAPTURE[$_rq_cmd]:-}" ]]; then
+        return 0
+    fi
+    mock::report::fail "$_rq_cmd" "Stdin Not Captured" "Stdin capture enabled" \
+        "Status" "Register it with: mock -stdin $_rq_cmd"
+    return 1
+}
+
+#######################################
 # Asserts that a mock received specific STDIN content in ANY call.
 #
 # Arguments:
@@ -1337,6 +1443,7 @@ assert_called_at_index() {
 assert_stdin_equals() {
     mock::internal::assert_command 1 -1 "$@" || return 1
     local _ase_cmd="$1"
+    mock::internal::require_capture "$_ase_cmd" || return 1
     shift
     local _ase_pattern="$*"
 
@@ -1368,6 +1475,7 @@ assert_stdin_at_index() {
     fi
     local _asi_cmd="$1"
     mock::internal::require_registered "$_asi_cmd" || return 1
+    mock::internal::require_capture "$_asi_cmd" || return 1
     local _asi_index
     _asi_index=$(mock::internal::decimal "$2") || return 1
     shift 2
@@ -1401,6 +1509,7 @@ assert_stdin_at_index() {
 assert_stdin_complete() {
     mock::internal::assert_command 2 2 "$@" || return 1
     local _sc_cmd="$1" _sc_index _sc_file _sc_state=unavailable
+    mock::internal::require_capture "$_sc_cmd" || return 1
     _sc_index=$(mock::internal::decimal "$2") || return 1
     _sc_file="$BATS_MOCK_STATE_DIR/$_sc_cmd.calls/$_sc_index/capture"
     if [[ -f "$_sc_file" ]]; then

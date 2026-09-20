@@ -159,11 +159,14 @@ made: all three dependencies are mocked. The assertions here are provided by thi
 ## Mocking a command
 
 ```bash
-mock COMMAND [PATTERN] [ACTION]
+mock [-stdin] [--] COMMAND [PATTERN] [ACTION]
 ```
 
 `mock` defines a shell function named `COMMAND`. The function logs the call, finds the
 first rule whose pattern matches the arguments, and evaluates that rule's action.
+
+`-stdin` records what the call received on stdin. It is off by default. [Stdin](#stdin)
+explains why. Use `--` when a command name begins with a hyphen.
 
 - `PATTERN` is matched against the arguments joined by single spaces. It is a glob by
   default. A leading `~` makes it an extended regex. The default is `*`. An invalid regex
@@ -193,7 +196,7 @@ test ignores that status. Check `run`'s `$status` and assert the expected intera
 ### Spying on real behavior
 
 ```bash
-mock_spy COMMAND
+mock_spy [-stdin] [--] COMMAND
 ```
 
 Logs every call and then runs the original: the saved function when there was one, the
@@ -223,7 +226,7 @@ not reach the test's shell.
 ### Sequencing responses
 
 ```bash
-mock_sequence COMMAND PATTERN ACTION...
+mock_sequence [-stdin] [--] COMMAND PATTERN ACTION...
 ```
 
 The first call that matches runs the first action, the second call the second, and so on.
@@ -267,12 +270,21 @@ during an active session.
 
 ## Stdin
 
-A mock forwards non-terminal stdin to its action while copying it to a per-call log.
+Register a mock with `-stdin` to record what each call received on stdin. Capture is off
+by default: it costs a temporary file, a `tee` child process and a drain on every call,
+and most mocks never have their input asserted. Under bats, stdin is a socket that never
+reports EOF, so the drain waits its full timeout on a mock that inherits it. Capturing
+only where a test asserts stdin takes a call from about 113 ms to about 5 ms.
+
+Without `-stdin`, a mock still forwards stdin to its action untouched. Only the recording
+is skipped, and the stdin assertions say so rather than comparing against an empty record.
+Set `BATS_MOCK_CAPTURE_STDIN=1` to capture for every mock, as earlier releases did.
+
 Use an action that consumes the input when the test needs to verify the complete payload:
 
 ```bash
 @test "upload: pipeline -> forwards and records the payload" {
-    mock upload '*' 'command cat >/dev/null'
+    mock -stdin upload '*' 'command cat >/dev/null'
     send_payload() { printf 'release=v1.2.0\n' | upload; }
 
     run send_payload

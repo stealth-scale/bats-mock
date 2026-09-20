@@ -6,6 +6,33 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Stdin capture is off unless a mock is registered with `-stdin`. `mock`, `mock_spy` and
+  `mock_sequence` accept the flag, and `--` ends option parsing. Capture cost a temporary
+  file, a `tee` child and a drain on every call. Under bats, stdin is a socket that never
+  reports EOF, so the drain waited its full 0.1 second timeout on any mock that inherited
+  it: a call cost 113 ms and now costs 5 ms. Set `BATS_MOCK_CAPTURE_STDIN=1` to restore
+  the old behaviour for every mock. `assert_stdin_equals`, `assert_stdin_at_index` and
+  `assert_stdin_complete` report that capture was not enabled instead of comparing against
+  an empty record.
+- A lock retries immediately sixteen times before it sleeps. A lock is held for
+  microseconds, so sleeping 0.1 seconds on the first miss turned a brief overlap into a
+  0.1 second stall. The test suite has 228 such waits and runs 4 seconds faster.
+- A new rule no longer rebuilds the generated wrapper. The wrapper reads its rules at call
+  time, so registering a second rule for a command publishes it and leaves the body alone.
+- `mock::internal::sanitize_ref` writes through a nameref and memoises its result. The
+  previous command substitution ran a subshell for every registration, compile and unmock.
+- `mock::internal::require_session` reads the ownership marker without a subshell and
+  resolves the session path once per session rather than on every call.
+
+### Removed
+
+- `mock::internal::sanitize`. Every caller now uses `mock::internal::sanitize_ref`.
+- The rule reload inside `mock::jit::compile`. Rules are published as they are registered,
+  and `unmock` and `mock_teardown` drop the rules file and the variables together, so
+  rebuilding the rules from the file could not be reached.
+
 ## [1.0.1] - 2026-09-19
 
 ### Fixed

@@ -484,7 +484,7 @@ slow_lock_attempts() {
 @test "side_effect: return -> preserves arguments and variable changes" {
     local RESULT=""
     # shellcheck disable=SC2016  # evaluated by the mock
-    mock probe "*" 'RESULT="$#|$1|$2|$3"; return 23'
+    mock -stdin probe "*" 'RESULT="$#|$1|$2|$3"; return 23'
     local result_code=0
     probe "" "two words" "*" || result_code=$?
     [ "$result_code" -eq 23 ]
@@ -548,9 +548,9 @@ slow_lock_attempts() {
 
 @test "interaction: nested returns -> preserves outer status and arguments" {
     local RESULT=""
-    mock inner "*" "return 3"
+    mock -stdin inner "*" "return 3"
     # shellcheck disable=SC2016  # evaluated by the mock
-    mock outer "*" 'inner "$@"; RESULT="$1"; return 9'
+    mock -stdin outer "*" 'inner "$@"; RESULT="$1"; return 9'
     local result_code=0
     outer value || result_code=$?
     [ "$result_code" -eq 9 ]
@@ -1019,7 +1019,7 @@ slow_lock_attempts() {
 }
 
 @test "assertions: missing log -> registered mocks report one structured failure" {
-    mock probe '*' true
+    mock -stdin probe '*' true
     probe value
     mv "$BATS_MOCK_STATE_DIR/probe.log" "$BATS_MOCK_STATE_DIR/probe.log.saved"
     local function_name
@@ -1216,7 +1216,7 @@ slow_lock_attempts() {
 }
 
 @test "feedback: stdin -> distinguishes an uncalled mock from recorded empty input" {
-    mock probe '*' 'cat >/dev/null'
+    mock -stdin probe '*' 'cat >/dev/null'
     run assert_stdin_equals probe expected
     [ "$status" -eq 1 ]
     [[ "$output" == *'Stdin Mismatch'* ]]
@@ -1230,7 +1230,7 @@ slow_lock_attempts() {
 }
 
 @test "feedback: stdin -> bounds diagnostic history without truncating captured data" {
-    mock probe '*' 'cat >/dev/null'
+    mock -stdin probe '*' 'cat >/dev/null'
     local payload i
     printf -v payload '%1000s' ''
     payload=${payload// /x}
@@ -1469,6 +1469,56 @@ slow_lock_attempts() {
     [ "$output" = second ]
     run dirty_check anything
     [ "$output" = first ]
+}
+
+@test "options: -- -> ends option parsing before the command name" {
+    mock -- probe '*' 'printf parsed'
+    run probe anything
+    [ "$status" -eq 0 ]
+    [ "$output" = parsed ]
+    assert_called_once_with probe anything
+}
+
+@test "options: stdin -> mock_sequence records input for each action" {
+    mock_sequence -stdin seq_in '*' 'command cat >/dev/null' 'command cat >/dev/null'
+    printf 'first' | seq_in
+    printf 'second' | seq_in
+    assert_stdin_at_index seq_in 0 first
+    assert_stdin_at_index seq_in 1 second
+}
+
+@test "options: stdin -> assertions name the flag when capture is off" {
+    mock quiet '*' true
+    printf 'payload' | quiet
+
+    run assert_stdin_equals quiet payload
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Stdin Not Captured'* ]]
+    [[ "$output" == *'mock -stdin quiet'* ]]
+
+    run assert_stdin_at_index quiet 0 payload
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Stdin Not Captured'* ]]
+
+    run assert_stdin_complete quiet 0
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Stdin Not Captured'* ]]
+}
+
+@test "whitebox: dirty flag -> enabling capture rebuilds the wrapper" {
+    mock capture_check "*" "true"
+    # shellcheck disable=SC2154  # set by mock::jit::compile
+    [ "${_BATS_MOCK_DIRTY_capture_check}" -eq 0 ]
+    local before
+    before=$(declare -f capture_check)
+
+    # The capture path is compiled in, so -stdin must produce a new body.
+    mock -stdin capture_check "*" "true"
+    [ "${_BATS_MOCK_DIRTY_capture_check}" -eq 0 ]
+    [ "$(declare -f capture_check)" != "$before" ]
+
+    printf 'payload' | capture_check
+    assert_stdin_equals capture_check "payload"
 }
 
 @test "whitebox: compilation cache -> preserves the wrapper, rules and history" {
@@ -2022,7 +2072,7 @@ slow_lock_attempts() {
 # ==============================================================================
 
 @test "stdin: basic -> captures piped input" {
-    mock uploader "*" "true"
+    mock -stdin uploader "*" "true"
 
     echo "data payload" | uploader "server"
 
@@ -2031,7 +2081,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: multiline -> captures multiple lines with newlines" {
-    mock parser "*" "true"
+    mock -stdin parser "*" "true"
 
     # Using ANSI-C quoting for newlines
     printf "Line 1\nLine 2\n" | parser "file.txt"
@@ -2041,7 +2091,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: exact -> preserves trailing newlines (binary fidelity)" {
-    mock binary_tool "*" "true"
+    mock -stdin binary_tool "*" "true"
 
     # echo puts a newline at the end. The framework MUST preserve this.
     echo "content" | binary_tool
@@ -2051,7 +2101,7 @@ slow_lock_attempts() {
 
 @test "stdin: replay -> piped input is passed to the mock action" {
     # If the mock is just "cat", it should output what was piped in.
-    mock passthrough "*" "cat"
+    mock -stdin passthrough "*" "cat"
 
     run bash -c "echo 'secret' | passthrough"
     [ "$output" = "secret" ]
@@ -2061,7 +2111,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: index -> assert_stdin_at_index checks specific call" {
-    mock logger "*" "true"
+    mock -stdin logger "*" "true"
 
     echo "first" | logger
     echo "second" | logger
@@ -2071,7 +2121,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: index fail -> fails on mismatch" {
-    mock logger "*" "true"
+    mock -stdin logger "*" "true"
 
     echo "first" | logger
 
@@ -2081,14 +2131,14 @@ slow_lock_attempts() {
 }
 
 @test "stdin: empty -> empty pipe results in empty string" {
-    mock cmd "*" "true"
+    mock -stdin cmd "*" "true"
     # Pipe empty string
     printf "" | cmd
     assert_stdin_equals "cmd" ""
 }
 
 @test "stdin: no pipe -> results in empty string (and doesn't hang)" {
-    mock cmd "*" "true"
+    mock -stdin cmd "*" "true"
     # No pipe at all
     cmd
     # If no stdin was provided, we likely want to assert it was empty
@@ -2099,7 +2149,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: return -> writes history and removes the capture file" {
-    mock probe "*" "return 7"
+    mock -stdin probe "*" "return 7"
     run probe
     [ "$status" -eq 7 ]
     assert_stdin_at_index probe 0 ""
@@ -2108,7 +2158,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: unmatched -> keeps stdin and argument history aligned" {
-    mock probe yes true
+    mock -stdin probe yes true
     run -127 probe no
     assert_stdin_at_index probe 0 ""
     probe yes
@@ -2116,7 +2166,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: index -> rejects negative, arithmetic and oversized indices" {
-    mock probe "*" true
+    mock -stdin probe "*" true
     probe
     assert_stdin_at_index probe 000 ""
     local index
@@ -2129,7 +2179,7 @@ slow_lock_attempts() {
 
 @test "stdin: internal reads -> bypasses mocked cat" {
     mock cat "*" "echo mocked"
-    mock probe "*" "command cat; return 6"
+    mock -stdin probe "*" "command cat; return 6"
     run_with_timeout 5 bash -c 'printf payload | probe'
     [ "$status" -eq 6 ]
     [ "$output" = payload ]
@@ -2138,7 +2188,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: marker -> literal newline marker stays distinct from physical newlines" {
-    mock probe '*' 'command cat >/dev/null'
+    mock -stdin probe '*' 'command cat >/dev/null'
     printf '%s' '<newline>' | probe
     assert_stdin_equals probe '<newline>'
     run assert_stdin_equals probe $'\n'
@@ -2151,7 +2201,7 @@ slow_lock_attempts() {
 
 @test "stdin: concurrent completion -> argument and stdin indexes refer to the same call" {
     # shellcheck disable=SC2016  # expanded when the mock action runs
-    mock probe '*' '
+    mock -stdin probe '*' '
         command cat >/dev/null
         if [[ $1 == first ]]; then
             : > "$BATS_TEST_TMPDIR/first-started"
@@ -2177,14 +2227,14 @@ slow_lock_attempts() {
 }
 
 @test "stdin: complete -> records EOF after the action consumes the stream" {
-    mock probe '*' 'command cat >/dev/null'
+    mock -stdin probe '*' 'command cat >/dev/null'
     printf 'payload\n\n' | probe
     assert_stdin_equals probe $'payload\n\n'
     assert_stdin_complete probe 000
 }
 
 @test "stdin: partial -> bounded capture does not claim to have reached EOF" {
-    mock probe '*' true
+    mock -stdin probe '*' true
     run_with_timeout 5 bash -c 'yes payload | probe'
     [ "$status" -eq 0 ]
     run assert_stdin_complete probe 0
@@ -2193,7 +2243,7 @@ slow_lock_attempts() {
 }
 
 @test "stdin: unavailable -> unmatched calls and missing indexes are not complete" {
-    mock probe yes true
+    mock -stdin probe yes true
     run -127 probe no
     run assert_stdin_complete probe 0
     [ "$status" -eq 1 ]
@@ -2255,7 +2305,7 @@ slow_lock_attempts() {
 
 @test "spy: open stdin -> ignored TERM cannot strand the capture process" {
     original() { return 7; }
-    mock_spy original
+    mock_spy -stdin original
     local fifo="$BATS_TEST_TMPDIR/open-input"
     mkfifo "$fifo"
     # shellcheck disable=SC2016  # expanded in the child shell
@@ -2285,7 +2335,7 @@ slow_lock_attempts() {
 @test "spy: no-op -> consistently captures a short finite input" {
     # shellcheck disable=SC2329  # invoked in the child shell
     ignore_input() { :; }
-    mock_spy ignore_input
+    mock_spy -stdin ignore_input
     # shellcheck disable=SC2016  # expanded in the child shell
     run_with_timeout 15 bash -c '
         for ((i=0; i<50; i++)); do
@@ -2310,7 +2360,7 @@ slow_lock_attempts() {
 }
 
 @test "spy: concurrency -> parallel finite streams retain every call" {
-    mock_spy cat
+    mock_spy -stdin cat
     # shellcheck disable=SC2016  # expanded in the child shell
     run_with_timeout 10 bash -c '
         pids=()
@@ -2330,7 +2380,7 @@ slow_lock_attempts() {
 }
 
 @test "spy: log lock -> times out and removes the capture file" {
-    mock_spy head
+    mock_spy -stdin head
     mkdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
     slow_lock_attempts "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
     run_with_timeout 15 bash -c 'head -n 1 </dev/null'
@@ -2370,7 +2420,7 @@ slow_lock_attempts() {
 }
 
 @test "spy: finite stream -> forwards and captures more than a pipe buffer" {
-    mock_spy cat
+    mock_spy -stdin cat
     run_with_timeout 5 bash -o pipefail -c 'dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr "\000" x | cat | wc -c'
     [ "$status" -eq 0 ]
     [ "${output//[[:space:]]/}" = 131072 ]
@@ -2381,7 +2431,7 @@ slow_lock_attempts() {
 }
 
 @test "spy: newline-heavy stream -> encodes logs without quadratic slowdown" {
-    mock_spy cat
+    mock_spy -stdin cat
     run_with_timeout 5 bash -o pipefail -c 'awk "BEGIN { for (i=0; i<65536; i++) print \"x\" }" | cat | wc -l'
     [ "$status" -eq 0 ]
     [ "${output//[[:space:]]/}" = 65536 ]
@@ -2415,7 +2465,7 @@ slow_lock_attempts() {
 @test "spy: side effects -> preserves changes while reading stdin" {
     # shellcheck disable=SC2034  # inspected by the child shell after the spy returns
     consume_line() { IFS= read -r consumed_line; return 17; }
-    mock_spy consume_line
+    mock_spy -stdin consume_line
     # shellcheck disable=SC2016  # expanded in the child shell
     run_with_timeout 5 bash -c '
         result=0
