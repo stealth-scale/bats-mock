@@ -227,25 +227,36 @@ mock::report::fail() {
 # CORE ENGINE (JIT & RULE MANAGEMENT)
 # ==============================================================================
 
+# Memo table for sanitize_ref. Cleared with the session by mock_teardown.
+declare -gA _BATS_MOCK_SAFE=()
+
 #######################################
-# Sanitizes a string for use as a variable name.
+# Writes the sanitized name into the nameref named by $1.
+# A command substitution costs a subshell on a path that runs for every
+# registration, every compile and every unmock, so this form avoids one.
 #
 # Arguments:
-#    $1 (String) - _san_str: The string to sanitize.
-# Returns:
-#    String - Sanitized string (alphanumeric and underscores only).
+#    $1 (Nameref) - Output variable.
+#    $2 (String)  - The string to sanitize.
 #######################################
-mock::internal::sanitize() {
-    local _san_str="$1"
-    if [[ "$_san_str" == *[!a-zA-Z0-9_]* ]]; then
-        # The reserved prefix separates encoded names from ordinary identifiers.
-        _san_str="${_san_str//_/_u}"
-        _san_str="${_san_str//./_d}"
-        _san_str="${_san_str//:/_c}"
-        _san_str="${_san_str//-/_h}"
-        _san_str="${BATS_MOCK_PREFIX}_ENCODED_${_san_str}"
+mock::internal::sanitize_ref() {
+    local -n _sr_out="$1"
+    local _sr_in="$2"
+    if [[ -n "${_BATS_MOCK_SAFE[$_sr_in]:-}" ]]; then
+        _sr_out="${_BATS_MOCK_SAFE[$_sr_in]}"
+        return 0
     fi
-    printf '%s\n' "$_san_str"
+    local _sr_v="$_sr_in"
+    if [[ "$_sr_v" == *[!a-zA-Z0-9_]* ]]; then
+        # The reserved prefix separates encoded names from ordinary identifiers.
+        _sr_v="${_sr_v//_/_u}"
+        _sr_v="${_sr_v//./_d}"
+        _sr_v="${_sr_v//:/_c}"
+        _sr_v="${_sr_v//-/_h}"
+        _sr_v="${BATS_MOCK_PREFIX}_ENCODED_${_sr_v}"
+    fi
+    _BATS_MOCK_SAFE["$_sr_in"]="$_sr_v"
+    _sr_out="$_sr_v"
 }
 
 #######################################
@@ -329,7 +340,7 @@ mock::internal::assert_command() {
 mock::jit::compile() {
     local _jit_cmd="$1"
     local _jit_safe_cmd
-    _jit_safe_cmd=$(mock::internal::sanitize "$_jit_cmd")
+    mock::internal::sanitize_ref _jit_safe_cmd "$_jit_cmd"
 
     local _jit_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_jit_safe_cmd}"
     if [[ "${!_jit_dirty_var:-0}" -eq 0 ]] && declare -f -- "$_jit_cmd" >/dev/null; then
@@ -568,7 +579,7 @@ mock::jit::add_rule() {
     printf "%s\0%s\0" "$_ar_pattern" "$_ar_action" >> "$_ar_rules_file" || return 1
 
     local _ar_safe_cmd
-    _ar_safe_cmd=$(mock::internal::sanitize "$_ar_cmd_name")
+    mock::internal::sanitize_ref _ar_safe_cmd "$_ar_cmd_name"
     local _ar_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_ar_safe_cmd}"
     printf -v "$_ar_dirty_var" "1"
     export "${_ar_dirty_var?}"
@@ -612,6 +623,7 @@ mock_setup() {
     if [[ "$BATS_MOCK_GLOBAL_LOG" != /* ]]; then
         export BATS_MOCK_GLOBAL_LOG="$PWD/$BATS_MOCK_GLOBAL_LOG"
     fi
+    declare -gA _BATS_MOCK_SAFE=()
     export _BATS_MOCK_SESSION_DIR="$_setup_dir"
     export _BATS_MOCK_SESSION_CONFIG="$BATS_MOCK_STATE_DIR"
     export _BATS_MOCK_SESSION_TOKEN="${BASHPID:-$$}:$RANDOM:$RANDOM"
@@ -630,10 +642,20 @@ mock::internal::require_session() {
         printf '%s\n' 'MOCK ERROR: No owned session at the configured path; call mock_setup first.' >&2
         return 1
     fi
-    if [[ "$(< "$_session_dir/.owner")" != "${_BATS_MOCK_SESSION_TOKEN:-}" ||
-          "$(builtin cd -P -- "$BATS_MOCK_STATE_DIR" && builtin pwd -P)" != "$_session_dir" ]]; then
+    local _rs_owner=
+    IFS= read -r _rs_owner < "$_session_dir/.owner" || :
+    if [[ "$_rs_owner" != "${_BATS_MOCK_SESSION_TOKEN:-}" ]]; then
         printf '%s\n' 'MOCK ERROR: State directory ownership changed; refusing to use or remove it.' >&2
         return 1
+    fi
+    # Resolving the path costs a subshell. The owner marker above is checked
+    # on every call, so resolve the path once per session.
+    if [[ "${_BATS_MOCK_SESSION_RESOLVED:-}" != "$_session_dir" ]]; then
+        if [[ "$(builtin cd -P -- "$BATS_MOCK_STATE_DIR" && builtin pwd -P)" != "$_session_dir" ]]; then
+            printf '%s\n' 'MOCK ERROR: State directory ownership changed; refusing to use or remove it.' >&2
+            return 1
+        fi
+        _BATS_MOCK_SESSION_RESOLVED="$_session_dir"
     fi
 }
 
@@ -727,7 +749,7 @@ unmock() {
     unset -v "BASH_FUNC_${_um_cmd}%%" 2>/dev/null || true
 
     local _um_safe_cmd
-    _um_safe_cmd=$(mock::internal::sanitize "$_um_cmd")
+    mock::internal::sanitize_ref _um_safe_cmd "$_um_cmd"
 
     # Safely unset all rule variables
     local _um_count_var="${BATS_MOCK_PREFIX}_RULE_COUNT_${_um_safe_cmd}"
@@ -788,7 +810,7 @@ mock_spy() {
 
     if [[ -n "$_ms_orig_def" ]]; then
         local _ms_safe_cmd
-        _ms_safe_cmd=$(mock::internal::sanitize "$_ms_cmd")
+        mock::internal::sanitize_ref _ms_safe_cmd "$_ms_cmd"
         local _ms_hidden_name="${BATS_MOCK_PREFIX}_SPY_ORIGINAL_${_ms_safe_cmd}"
 
         # Bash 'declare -f' standardizes output to "name ()".
