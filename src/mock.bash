@@ -342,33 +342,14 @@ mock::jit::compile() {
     local _jit_safe_cmd
     mock::internal::sanitize_ref _jit_safe_cmd "$_jit_cmd"
 
+    # A function of this name existing is not proof that we generated it:
+    # mock_spy runs while the original is still defined. Track our own build.
     local _jit_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_jit_safe_cmd}"
-    if [[ "${!_jit_dirty_var:-0}" -eq 0 ]] && declare -f -- "$_jit_cmd" >/dev/null; then
+    local _jit_built_var="${BATS_MOCK_PREFIX}_BUILT_${_jit_safe_cmd}"
+    if [[ "${!_jit_dirty_var:-0}" -eq 0 && -n "${!_jit_built_var:-}" ]] &&
+       declare -f -- "$_jit_cmd" >/dev/null; then
         return 0
     fi
-
-    local _jit_rules_file="${BATS_MOCK_STATE_DIR}/${_jit_cmd}.rules"
-    local _jit_patterns=()
-    local _jit_actions=()
-
-    if [[ -f "$_jit_rules_file" ]]; then
-        while IFS= read -r -d '' _jit_pat && IFS= read -r -d '' _jit_act; do
-            _jit_patterns+=("$_jit_pat")
-            _jit_actions+=("$_jit_act")
-        done < "$_jit_rules_file"
-    fi
-
-    local _jit_count=${#_jit_patterns[@]}
-    local _jit_i
-    for ((_jit_i=0; _jit_i<_jit_count; _jit_i++)); do
-        local _jit_pat_var="${BATS_MOCK_PREFIX}_RULE_${_jit_safe_cmd}_${_jit_i}_PAT"
-        local _jit_act_var="${BATS_MOCK_PREFIX}_RULE_${_jit_safe_cmd}_${_jit_i}_ACT"
-
-        printf -v "$_jit_pat_var" "%s" "${_jit_patterns[$_jit_i]}"
-        printf -v "$_jit_act_var" "%s" "${_jit_actions[$_jit_i]}"
-        export "${_jit_pat_var?}" "${_jit_act_var?}"
-    done
-    export "${BATS_MOCK_PREFIX}_RULE_COUNT_${_jit_safe_cmd}=$_jit_count"
 
     local _jit_state_dir _jit_global_log
     printf -v _jit_state_dir '%q' "$BATS_MOCK_STATE_DIR"
@@ -557,7 +538,8 @@ mock::jit::compile() {
     fi
 
     printf -v "$_jit_dirty_var" "0"
-    export "${_jit_dirty_var?}"
+    printf -v "$_jit_built_var" "1"
+    export "${_jit_dirty_var?}" "${_jit_built_var?}"
 }
 
 #######################################
@@ -580,9 +562,18 @@ mock::jit::add_rule() {
 
     local _ar_safe_cmd
     mock::internal::sanitize_ref _ar_safe_cmd "$_ar_cmd_name"
-    local _ar_dirty_var="${BATS_MOCK_PREFIX}_DIRTY_${_ar_safe_cmd}"
-    printf -v "$_ar_dirty_var" "1"
-    export "${_ar_dirty_var?}"
+
+    # The generated wrapper reads its rules from these variables at call time,
+    # so a new rule needs no new wrapper. Publish it and leave the body alone.
+    local _ar_count_var="${BATS_MOCK_PREFIX}_RULE_COUNT_${_ar_safe_cmd}"
+    local _ar_index="${!_ar_count_var:-0}"
+    local _ar_pat_var="${BATS_MOCK_PREFIX}_RULE_${_ar_safe_cmd}_${_ar_index}_PAT"
+    local _ar_act_var="${BATS_MOCK_PREFIX}_RULE_${_ar_safe_cmd}_${_ar_index}_ACT"
+
+    printf -v "$_ar_pat_var" "%s" "$_ar_pattern"
+    printf -v "$_ar_act_var" "%s" "$_ar_action"
+    printf -v "$_ar_count_var" "%s" "$(( _ar_index + 1 ))"
+    export "${_ar_pat_var?}" "${_ar_act_var?}" "${_ar_count_var?}"
 }
 
 # ==============================================================================
@@ -761,6 +752,7 @@ unmock() {
     done
     unset "$_um_count_var"
     unset "${BATS_MOCK_PREFIX}_DIRTY_${_um_safe_cmd}"
+    unset "${BATS_MOCK_PREFIX}_BUILT_${_um_safe_cmd}"
     unset -f "${BATS_MOCK_PREFIX}_SPY_ORIGINAL_${_um_safe_cmd}"
     unset -f "${BATS_MOCK_PREFIX}_ACTION_${_um_safe_cmd}"
 

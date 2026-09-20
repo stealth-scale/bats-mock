@@ -1446,19 +1446,29 @@ slow_lock_attempts() {
     run step; [ "$output" = second ]
 }
 
-@test "whitebox: dirty flag -> internal flag is set on creation" {
-    mock dirty_check "*" "true"
-    # mock() compiles immediately, so dirty should be 0
+@test "whitebox: rules -> a new rule is published without rebuilding the wrapper" {
+    mock dirty_check "*" "printf first"
     # shellcheck disable=SC2154  # set by mock::jit::compile
     [ "${_BATS_MOCK_DIRTY_dirty_check}" -eq 0 ]
+    # shellcheck disable=SC2154  # set by mock::jit::compile
+    [ "${_BATS_MOCK_BUILT_dirty_check}" -eq 1 ]
+    # shellcheck disable=SC2154  # set by mock::jit::add_rule
+    [ "${_BATS_MOCK_RULE_COUNT_dirty_check}" -eq 1 ]
 
-    # Manually add a rule to trigger dirty state
-    mock::jit::add_rule "dirty_check" "*" "true"
-    [ "${_BATS_MOCK_DIRTY_dirty_check}" -eq 1 ]
+    local before
+    before=$(declare -f dirty_check)
 
-    # Compile cleans it
-    mock::jit::compile "dirty_check"
+    # The wrapper reads its rules at call time, so a second rule needs no
+    # rebuild: the body is unchanged and the mock still honours the new rule.
+    mock dirty_check "second" "printf second"
     [ "${_BATS_MOCK_DIRTY_dirty_check}" -eq 0 ]
+    [ "${_BATS_MOCK_RULE_COUNT_dirty_check}" -eq 2 ]
+    [ "$(declare -f dirty_check)" = "$before" ]
+
+    run dirty_check second
+    [ "$output" = second ]
+    run dirty_check anything
+    [ "$output" = first ]
 }
 
 @test "whitebox: compilation cache -> preserves the wrapper, rules and history" {
