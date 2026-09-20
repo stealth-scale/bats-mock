@@ -61,13 +61,15 @@ fi
 mock::sync::lock() {
     local _lock_dir_path="$1.lock"
     local _lock_deadline=$((SECONDS + 5))
+    local -i _lock_tries=0
 
     while ! command mkdir -- "$_lock_dir_path" 2>/dev/null; do
         if (( SECONDS >= _lock_deadline )); then
             echo "MOCK TIMEOUT: Could not acquire lock for $1" >&2
             return 1
         fi
-        command sleep 0.1
+        ((_lock_tries+=1))
+        if (( _lock_tries > 16 )); then command sleep 0.05; fi
     done
     return 0
 }
@@ -392,12 +394,14 @@ mock::jit::compile() {
         # Release it before running user code, including nested mocks.
         local _mock_history_lock=\"\$_mock_state_dir/history.lock\"
         local _mock_history_deadline=\$((SECONDS + 5))
+        local -i _mock_history_tries=0
         while ! command mkdir -- \"\$_mock_history_lock\" 2>/dev/null; do
             if (( SECONDS >= _mock_history_deadline )); then
                 builtin printf 'MOCK TIMEOUT: Could not acquire call history lock\\n' >&2
                 return 1
             fi
-            command sleep 0.1
+            ((_mock_history_tries+=1))
+            if (( _mock_history_tries > 16 )); then command sleep 0.05; fi
         done
         local _mock_call_index
         if ! IFS= read -r _mock_call_index < \"\$_mock_state_dir/${_jit_cmd}.next\" ||
@@ -499,13 +503,15 @@ mock::jit::compile() {
         # than one write. A stale lock must fail instead of hanging the caller.
         local stdin_lock=\"\$_mock_state_dir/${_jit_cmd}.stdin.log.lock\"
         local _mock_stdin_deadline=\$((SECONDS + 5))
+        local -i _mock_stdin_tries=0
         while ! command mkdir -- \"\$stdin_lock\" 2>/dev/null; do
              if (( SECONDS >= _mock_stdin_deadline )); then
                  builtin printf 'MOCK TIMEOUT: Could not acquire stdin log lock for %s\\n' \"\$cmd_name\" >&2
                  [[ -z \"\${stdin_tmp:-}\" ]] || command rm -f -- \"\$stdin_tmp\"
                  return 1
              fi
-             command sleep 0.1
+             ((_mock_stdin_tries+=1))
+             if (( _mock_stdin_tries > 16 )); then command sleep 0.05; fi
         done
 
         local log_status=0
@@ -841,9 +847,11 @@ mock_sequence() {
 
     # 1. Acquire Lock
     local _mock_sequence_deadline=\$((SECONDS + 5))
+    local _mock_sequence_tries=0
     while ! command mkdir -- \"\$lock_dir\" 2>/dev/null; do
         if (( SECONDS >= _mock_sequence_deadline )); then echo 'Lock timeout' >&2; return 1; fi
-        command sleep 0.1
+        ((_mock_sequence_tries+=1))
+        if (( _mock_sequence_tries > 16 )); then command sleep 0.05; fi
     done
 
     # 2. Critical Section
