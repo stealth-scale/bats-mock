@@ -1388,6 +1388,33 @@ slow_lock_attempts() {
     [ "$status" -eq 0 ]
 }
 
+@test "config: state dir -> sits under the directory bats gave this test" {
+    # Not a shared path. Two tests running at once would otherwise own one
+    # directory and take it from each other, and a test that was killed
+    # would leave it behind for every later run to trip over.
+    [ -n "$BATS_TEST_TMPDIR" ]
+    [ "$BATS_MOCK_STATE_DIR" = "$BATS_TEST_TMPDIR/mocks" ]
+    [ -d "$BATS_MOCK_STATE_DIR" ]
+}
+
+@test "config: state dir -> is nowhere near the shared temporary directory" {
+    [[ "$BATS_MOCK_STATE_DIR" != /tmp/mocks ]]
+}
+
+@test "config: state dir -> reading this file exports no path" {
+    # A default exported while the file is read reaches every later
+    # process, which is how one path became everybody's.
+    local exported
+    exported=$(
+        unset BATS_MOCK_TMPDIR BATS_MOCK_STATE_DIR BATS_MOCK_GLOBAL_LOG
+        unset BATS_TEST_TMPDIR
+        # shellcheck source=/dev/null
+        source "$BATS_TEST_DIRNAME/../src/mock.bash"
+        export -p | grep -cE 'BATS_MOCK_(TMPDIR|STATE_DIR|GLOBAL_LOG)=' || true
+    )
+    [ "$exported" -eq 0 ]
+}
+
 @test "config: state dir -> respects BATS_MOCK_STATE_DIR" {
     mock_teardown
     local custom_dir="${BATS_TEST_TMPDIR}/custom_mocks"

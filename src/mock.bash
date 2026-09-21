@@ -28,15 +28,35 @@
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
 
+# Where this file put state when the caller said nothing, kept so that
+# mock_setup can tell its own default from a path somebody chose. These are
+# configuration and not session state, so they carry no _BATS_MOCK_ prefix:
+# mock_teardown clears every name with that prefix, and a later setup in the
+# same process still needs to know what it decided.
+BATS_MOCK_CHOSE_TMPDIR=1
+BATS_MOCK_CHOSE_STATE_DIR=1
+BATS_MOCK_CHOSE_GLOBAL_LOG=1
+
+[[ -n "${BATS_MOCK_TMPDIR:-}" ]] || BATS_MOCK_CHOSE_TMPDIR=0
+[[ -n "${BATS_MOCK_STATE_DIR:-}" ]] || BATS_MOCK_CHOSE_STATE_DIR=0
+[[ -n "${BATS_MOCK_GLOBAL_LOG:-}" ]] || BATS_MOCK_CHOSE_GLOBAL_LOG=0
+
 : "${BATS_MOCK_TMPDIR:=${BATS_TEST_TMPDIR:-/tmp}}"
 : "${BATS_MOCK_STATE_DIR:=${BATS_MOCK_TMPDIR}/mocks}"
 : "${BATS_MOCK_GLOBAL_LOG:=${BATS_MOCK_STATE_DIR}/global.log}"
 : "${BATS_MOCK_STRICT:=1}"
 
-export BATS_MOCK_TMPDIR
-export BATS_MOCK_STATE_DIR
+# What the defaults came out as. A value that still reads this way in
+# mock_setup is one nobody has chosen since, and BATS_TEST_TMPDIR is known
+# by then, so it can be worked out again against the running test.
+BATS_MOCK_DEFAULT_TMPDIR="$BATS_MOCK_TMPDIR"
+BATS_MOCK_DEFAULT_STATE_DIR="$BATS_MOCK_STATE_DIR"
+BATS_MOCK_DEFAULT_GLOBAL_LOG="$BATS_MOCK_GLOBAL_LOG"
+
+# Only the strictness is exported here. Exporting a default path would put
+# one directory in the environment of every later process, and two tests
+# running at once would then own it and take it from each other.
 export BATS_MOCK_STRICT
-export BATS_MOCK_GLOBAL_LOG
 
 # Internal prefix to avoid namespace collisions
 if [[ "${BATS_MOCK_PREFIX:-}" != "_BATS_MOCK" ]]; then
@@ -641,6 +661,40 @@ mock::jit::add_rule() {
     export "${_ar_pat_var?}" "${_ar_act_var?}" "${_ar_count_var?}"
 }
 
+#######################################
+# Works out where this session's state goes.
+#
+# A path the caller chose is left alone. A default one is put under the
+# directory bats gives the running test, which is empty while this file is
+# read and set by the time setup runs. That directory belongs to one test,
+# so two tests running at once do not own the same one, and a test that was
+# killed leaves nothing behind for the next run to trip over.
+#
+# Globals:
+#    BATS_MOCK_TMPDIR
+#    BATS_MOCK_STATE_DIR
+#    BATS_MOCK_GLOBAL_LOG
+#    BATS_TEST_TMPDIR
+#######################################
+mock::internal::resolve_state() {
+    local _rs_unchosen=0
+    if (( ${BATS_MOCK_CHOSE_TMPDIR:-1} == 0 )) \
+        && [[ "$BATS_MOCK_TMPDIR" == "${BATS_MOCK_DEFAULT_TMPDIR:-}" ]] \
+        && [[ -n "${BATS_TEST_TMPDIR:-}" ]]; then
+        BATS_MOCK_TMPDIR="$BATS_TEST_TMPDIR"
+        _rs_unchosen=1
+    fi
+    if (( _rs_unchosen == 1 )) && (( ${BATS_MOCK_CHOSE_STATE_DIR:-1} == 0 )) \
+        && [[ "$BATS_MOCK_STATE_DIR" == "${BATS_MOCK_DEFAULT_STATE_DIR:-}" ]]; then
+        BATS_MOCK_STATE_DIR="${BATS_MOCK_TMPDIR%/}/mocks"
+        if (( ${BATS_MOCK_CHOSE_GLOBAL_LOG:-1} == 0 )) \
+            && [[ "$BATS_MOCK_GLOBAL_LOG" == "${BATS_MOCK_DEFAULT_GLOBAL_LOG:-}" ]]; then
+            BATS_MOCK_GLOBAL_LOG="${BATS_MOCK_STATE_DIR}/global.log"
+        fi
+    fi
+    export BATS_MOCK_TMPDIR BATS_MOCK_STATE_DIR BATS_MOCK_GLOBAL_LOG
+}
+
 # ==============================================================================
 # PUBLIC API
 # ==============================================================================
@@ -662,6 +716,7 @@ mock_setup() {
         mock::internal::require_session
         return $?
     fi
+    mock::internal::resolve_state
     # Never adopt an existing directory: it may contain unrelated user files.
     if [[ -z "$BATS_MOCK_STATE_DIR" || -e "$BATS_MOCK_STATE_DIR" || -L "$BATS_MOCK_STATE_DIR" ]]; then
         printf '%s\n' 'MOCK ERROR: State directory must be a new, dedicated directory.' >&2
