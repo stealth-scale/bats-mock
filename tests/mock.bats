@@ -1392,8 +1392,19 @@ slow_lock_attempts() {
     # Not a shared path. Two tests running at once would otherwise own one
     # directory and take it from each other, and a test that was killed
     # would leave it behind for every later run to trip over.
+    #
+    # The two are compared after both are resolved. mock_setup resolves the
+    # path it owns, and what bats puts in BATS_TEST_TMPDIR is not always
+    # resolved: 1.7.0 writes a doubled slash in it, and on macOS the
+    # directory is reached through a symlink.
+    local previous="$PWD" resolved
     [ -n "$BATS_TEST_TMPDIR" ]
-    [ "$BATS_MOCK_STATE_DIR" = "$BATS_TEST_TMPDIR/mocks" ]
+
+    builtin cd -P -- "$BATS_TEST_TMPDIR"
+    resolved="$PWD"
+    builtin cd -- "$previous"
+
+    [ "$BATS_MOCK_STATE_DIR" = "$resolved/mocks" ]
     [ -d "$BATS_MOCK_STATE_DIR" ]
 }
 
@@ -1403,16 +1414,18 @@ slow_lock_attempts() {
 
 @test "config: state dir -> reading this file exports no path" {
     # A default exported while the file is read reaches every later
-    # process, which is how one path became everybody's.
-    local exported
-    exported=$(
-        unset BATS_MOCK_TMPDIR BATS_MOCK_STATE_DIR BATS_MOCK_GLOBAL_LOG
-        unset BATS_TEST_TMPDIR
-        # shellcheck source=/dev/null
-        source "$BATS_TEST_DIRNAME/../src/mock.bash"
-        export -p | grep -cE 'BATS_MOCK_(TMPDIR|STATE_DIR|GLOBAL_LOG)=' || true
-    )
-    [ "$exported" -eq 0 ]
+    # process, which is how one path became everybody's. Read in a process
+    # of its own, because the question is what the environment holds
+    # afterwards and this one already has an answer.
+    # shellcheck disable=SC2016  # $1 is read by the bash below, not by this one
+    run env -u BATS_MOCK_TMPDIR -u BATS_MOCK_STATE_DIR \
+        -u BATS_MOCK_GLOBAL_LOG -u BATS_TEST_TMPDIR \
+        bash -c 'source "$1"; export -p' _ "$BATS_TEST_DIRNAME/../src/mock.bash"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'BATS_MOCK_TMPDIR='* ]]
+    [[ "$output" != *'BATS_MOCK_STATE_DIR='* ]]
+    [[ "$output" != *'BATS_MOCK_GLOBAL_LOG='* ]]
 }
 
 @test "config: state dir -> respects BATS_MOCK_STATE_DIR" {
