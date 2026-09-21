@@ -239,6 +239,27 @@ slow_lock_attempts() {
     mv "$owned_dir.saved" "$owned_dir"
 }
 
+@test "core: ownership -> refuses a session recorded somewhere else" {
+    # The path that was configured and the directory the session owns have
+    # to be the same place. A second directory carrying a copy of the owner
+    # marker is not that place, and taking its word for it would let a
+    # teardown remove a directory this session never made.
+    local owned_dir="$BATS_MOCK_STATE_DIR"
+    local elsewhere="$BATS_TEST_TMPDIR/elsewhere"
+
+    mkdir "$elsewhere"
+    cp "$owned_dir/.owner" "$elsewhere/.owner"
+    export _BATS_MOCK_SESSION_DIR="$elsewhere"
+
+    run mock_teardown
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'ownership changed'* ]]
+    [ -d "$elsewhere" ]
+    [ -d "$owned_dir" ]
+
+    export _BATS_MOCK_SESSION_DIR="$owned_dir"
+}
+
 @test "core: ownership -> refuses a changed session marker" {
     local marker
     marker=$(< "$BATS_MOCK_STATE_DIR/.owner")
