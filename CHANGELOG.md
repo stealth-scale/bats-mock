@@ -6,6 +6,31 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-21
+
+### Fixed
+
+- Each test gets its own state directory. `BATS_MOCK_STATE_DIR` was worked out while this
+  file was being read, and `BATS_TEST_TMPDIR` is empty at that point, so the `/tmp/mocks`
+  fallback won for every consumer that loads the library at file scope. One directory was
+  then shared by every test in every process. Two things followed. A suite could not run
+  in parallel, because concurrent `bats` processes owned the same directory and took it
+  from each other: 266 of 276 tests failed that way in a consumer suite, which now runs in
+  20.6 seconds with `--jobs 16` against 118 seconds one at a time. And a run that was
+  killed left the directory behind, after which every later run failed in `setup` with
+  "State directory must be a new, dedicated directory", which reads like a broken library
+  rather than a stale directory in `/tmp`. The default is worked out again in `mock_setup`,
+  where `BATS_TEST_TMPDIR` holds the directory of the running test. A path the caller chose
+  is used as it is, including one exported after the library was read.
+
+### Changed
+
+- `BATS_MOCK_TMPDIR`, `BATS_MOCK_STATE_DIR` and `BATS_MOCK_GLOBAL_LOG` are no longer
+  exported while the library is read. Exporting a default put one path into the environment
+  of every later process, which is how one directory became everybody's. They are exported
+  by `mock_setup`, so anything reading them after setup is unaffected. A consumer reading
+  them before `mock_setup` sees the default rather than the resolved path.
+
 ## [1.1.0] - 2026-09-20
 
 ### Changed
@@ -86,7 +111,8 @@ Compatibility changes for users of earlier untagged revisions:
 - Lock timeouts account for command execution and scheduling overhead, including on macOS;
   stdin-log timeouts remove the temporary capture file.
 
-[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.1.0...main
+[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.2.0...main
+[1.2.0]: https://github.com/stealth-scale/bats-mock/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/stealth-scale/bats-mock/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/stealth-scale/bats-mock/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/stealth-scale/bats-mock/releases/tag/v1.0.0
