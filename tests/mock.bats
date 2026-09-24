@@ -1291,6 +1291,26 @@ slow_lock_attempts() {
     assert_called_times idle_probe 0
 }
 
+@test "debug: registered mocks -> no entries for the global log or the stdin logs" {
+    mock curl '*' true
+    curl https://example.invalid
+    run mock_debug 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'[ ACTIVE MOCKS ]'* ]]
+    [[ "$output" == *$'  curl\n'* ]]
+    [[ "$output" != *'curl.stdin'* ]]
+    [[ "$output" != *'  global'* ]]
+    [[ "$output" != *'Stdin:'* ]]
+}
+
+@test "debug: stdin -> shown for a mock that captures it" {
+    mock -stdin probe '*' 'command cat >/dev/null'
+    printf 'payload' | probe
+    run mock_debug 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'     Stdin:\n       -> payload'* ]]
+}
+
 @test "debug: default descriptor -> falls back to stderr when fd 3 is closed" {
     mock_debug >"$BATS_TEST_TMPDIR/debug.out" 2>"$BATS_TEST_TMPDIR/debug.err" 3>&-
     [ ! -s "$BATS_TEST_TMPDIR/debug.out" ]

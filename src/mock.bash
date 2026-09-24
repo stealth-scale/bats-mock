@@ -1673,7 +1673,46 @@ $_acs_formatted_log"
 }
 
 #######################################
-# Prints a debug report of all mocks to FD 3 (or stderr).
+# Prints one mock of the debug report: its rules and, for a mock that was
+# called, its calls and, when it captures stdin, what each call received.
+#
+# Arguments:
+#   $1 (String)  - The command
+#   $2 (Integer) - 1 to print the calls, 0 not to
+# Outputs:
+#   The entry, then an empty line
+#######################################
+mock::debug::details() {
+    local _mpd_cmd="$1" _mpd_show_history="$2" _mpd_pattern _mpd_action
+    local -i _mpd_idx=1
+
+    echo "  $_mpd_cmd"
+    while IFS= read -r -d '' _mpd_pattern && IFS= read -r -d '' _mpd_action; do
+        echo "     Rule $_mpd_idx: pattern '$_mpd_pattern'"
+        if [[ "$_mpd_action" == *$'\n'* ]]; then
+            printf '%s\n' "             | ${_mpd_action//$'\n'/$'\n'             | }"
+        else
+            echo "             Action: $_mpd_action"
+        fi
+        ((_mpd_idx+=1))
+    done < "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.rules"
+
+    if [[ "$_mpd_show_history" == 1 ]]; then
+        echo "     Calls:"
+        sed 's/^/       -> /' "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.log"
+        # Without capture the stdin log holds one empty line per call.
+        if [[ "${BATS_MOCK_CAPTURE_STDIN:-0}" == 1 || -n "${_BATS_MOCK_CAPTURE[$_mpd_cmd]:-}" ]]; then
+            echo "     Stdin:"
+            sed 's/^/       -> /' "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.stdin.log"
+        fi
+    fi
+    echo ""
+}
+
+#######################################
+# Prints a debug report of all mocks to FD 3 (or stderr). A mock is registered
+# when it has a rules file; the global log and the per-command logs belong to
+# the registered mocks and are not listed as mocks of their own.
 #
 # Arguments:
 #   $1 (Integer) - _deb_fd: Optional FD to write to (default: auto-detect 3 or 2).
@@ -1690,74 +1729,29 @@ mock_debug() {
         if [[ -e /proc/self/fd/3 ]]; then _deb_fd=3; fi
     fi
 
-    local _deb_active_mocks=() _deb_idle_mocks=() _deb_empty_mocks=()
-    local _deb_mock_cmds=""
-
-    if [[ -d "$BATS_MOCK_STATE_DIR" ]]; then
-        _deb_mock_cmds=$(find "$BATS_MOCK_STATE_DIR" -maxdepth 1 -name "*.rules" -o -name "*.log" | sed 's|.*/||; s|\.rules||; s|\.log||' | sort -u)
-    fi
-
-    for _deb_cmd in $_deb_mock_cmds; do
-        local _deb_log="${BATS_MOCK_STATE_DIR}/${_deb_cmd}.log"
-        local _deb_stdin_log="${BATS_MOCK_STATE_DIR}/${_deb_cmd}.stdin.log"
-        local _deb_rules="${BATS_MOCK_STATE_DIR}/${_deb_cmd}.rules"
-        local _deb_has_calls=0; [[ -s "$_deb_log" ]] && _deb_has_calls=1
-        local _deb_has_rules=0; [[ -s "$_deb_rules" ]] && _deb_has_rules=1
-
-        if [[ $_deb_has_calls -eq 1 ]]; then _deb_active_mocks+=("$_deb_cmd");
-        elif [[ $_deb_has_rules -eq 1 ]]; then _deb_idle_mocks+=("$_deb_cmd");
-        else _deb_empty_mocks+=("$_deb_cmd"); fi
-    done
-
-    _mock_print_details() {
-        local _mpd_cmd="$1"
-        local _mpd_show_history="$2"
-        local _mpd_log="${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.log"
-        local _mpd_stdin_log="${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.stdin.log"
-        local _mpd_rules="${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.rules"
-
-        echo "  $_mpd_cmd"
-        if [[ -f "$_mpd_rules" ]]; then
-             local _mpd_idx=1
-             while IFS= read -r -d '' _mpd_pattern && IFS= read -r -d '' _mpd_action; do
-                echo "     Rule $_mpd_idx: pattern '$_mpd_pattern'"
-                if [[ "$_mpd_action" == *$'\n'* ]]; then
-                    printf '%s\n' "             | ${_mpd_action//$'\n'/$'\n'             | }"
-                else
-                    echo "             Action: $_mpd_action"
-                fi
-                ((_mpd_idx+=1))
-            done < "$_mpd_rules"
+    local -a _deb_active_mocks=() _deb_idle_mocks=()
+    local _deb_rules_file _deb_cmd
+    for _deb_rules_file in "$BATS_MOCK_STATE_DIR"/*.rules; do
+        [[ -f "$_deb_rules_file" ]] || continue
+        _deb_cmd="${_deb_rules_file##*/}"
+        _deb_cmd="${_deb_cmd%.rules}"
+        if [[ -s "${BATS_MOCK_STATE_DIR}/${_deb_cmd}.log" ]]; then
+            _deb_active_mocks+=("$_deb_cmd")
         else
-             echo "     Rule : (Default)"
+            _deb_idle_mocks+=("$_deb_cmd")
         fi
-
-        if [[ "$_mpd_show_history" == "1" && -s "$_mpd_log" ]]; then
-            echo "     Calls:"
-            sed 's/^/       -> /' "$_mpd_log"
-
-            if [[ -s "$_mpd_stdin_log" ]]; then
-                 echo "     Stdin:"
-                 sed 's/^/       -> /' "$_mpd_stdin_log"
-            fi
-        fi
-        echo ""
-    }
+    done
 
     local _deb_body=""
     printf -v _deb_body "  State: %s\n\n" "$BATS_MOCK_STATE_DIR"
 
     if [[ ${#_deb_active_mocks[@]} -gt 0 ]]; then
         _deb_body+=$'  [ ACTIVE MOCKS ]\n  ------------------------------------------------------------------------------\n'
-        for _deb_cmd in "${_deb_active_mocks[@]}"; do _deb_body+="$(_mock_print_details "$_deb_cmd" "1")"$'\n'; done
+        for _deb_cmd in "${_deb_active_mocks[@]}"; do _deb_body+="$(mock::debug::details "$_deb_cmd" 1)"$'\n'; done
     fi
     if [[ ${#_deb_idle_mocks[@]} -gt 0 ]]; then
         _deb_body+=$'  [ IDLE MOCKS ]\n  ------------------------------------------------------------------------------\n'
-        for _deb_cmd in "${_deb_idle_mocks[@]}"; do _deb_body+="$(_mock_print_details "$_deb_cmd" "0")"$'\n'; done
-    fi
-    if [[ ${#_deb_empty_mocks[@]} -gt 0 ]]; then
-         _deb_body+=$'  [ UNUSED MOCKS ]\n  ------------------------------------------------------------------------------\n'
-         _deb_body+="    $(IFS=', '; echo "${_deb_empty_mocks[*]}")"$'\n\n'
+        for _deb_cmd in "${_deb_idle_mocks[@]}"; do _deb_body+="$(mock::debug::details "$_deb_cmd" 0)"$'\n'; done
     fi
 
     mock::report::frame "🐞 MOCK DEBUG REPORT" "$_deb_body" "$_deb_fd"
