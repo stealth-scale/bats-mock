@@ -6,6 +6,20 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-24
+
+### Fixed
+
+- `mock_spy -stdin` and `mock_sequence -stdin` capture stdin on a command that is already
+  mocked. Both set the capture flag without rebuilding the generated wrapper, so a command
+  registered earlier without `-stdin`, such as a fail-closed default in a shared `setup`,
+  kept a wrapper without the capture path. Its stdin assertions then reported a mismatch
+  against an empty record instead of the input. Both now pass `-stdin` to `mock`, which
+  rebuilds the wrapper when capture is turned on.
+- `mock_debug` lists the registered mocks only. It read every log of the state directory
+  as a mock of its own, so the report listed `global` and `<command>.stdin` beside the real
+  mocks, and it printed a `Stdin:` block of empty lines for a mock that captures nothing.
+
 ## [1.2.0] - 2026-09-21
 
 ### Fixed
@@ -111,7 +125,8 @@ Compatibility changes for users of earlier untagged revisions:
 - Lock timeouts account for command execution and scheduling overhead, including on macOS;
   stdin-log timeouts remove the temporary capture file.
 
-[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.2.0...main
+[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.2.1...main
+[1.2.1]: https://github.com/stealth-scale/bats-mock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/stealth-scale/bats-mock/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/stealth-scale/bats-mock/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/stealth-scale/bats-mock/compare/v1.0.0...v1.0.1
