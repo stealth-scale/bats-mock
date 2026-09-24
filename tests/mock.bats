@@ -1548,6 +1548,25 @@ slow_lock_attempts() {
     assert_stdin_at_index seq_in 1 second
 }
 
+@test "options: stdin -> mock_sequence captures input on a command that is already mocked" {
+    mock seq_in '*' 'command cat >/dev/null'
+    mock_sequence -stdin seq_in '*' 'command cat >/dev/null' 'command cat >/dev/null'
+    printf 'first' | seq_in
+    printf 'second' | seq_in
+    assert_stdin_at_index seq_in 0 first
+    assert_stdin_at_index seq_in 1 second
+}
+
+@test "options: stdin -> mock_spy captures input on a command that is already mocked" {
+    # shellcheck disable=SC2329  # saved by mock and called through the spy
+    consume() { command cat >/dev/null; }
+    mock consume '*' 'command cat >/dev/null'
+    mock_spy -stdin consume
+    printf 'payload' | consume
+    assert_stdin_equals consume payload
+    assert_stdin_complete consume 0
+}
+
 @test "options: stdin -> assertions name the flag when capture is off" {
     mock quiet '*' true
     printf 'payload' | quiet

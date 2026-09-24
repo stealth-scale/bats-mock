@@ -927,8 +927,10 @@ mock_spy() {
     fi
     mock::internal::validate_name "$_ms_cmd" || return 1
     mock::internal::require_session || return 1
+    # mock sets the capture flag and rebuilds a wrapper that already exists.
+    local -a _ms_opts=()
     if (( _ms_stdin == 1 )); then
-        _BATS_MOCK_CAPTURE["$_ms_cmd"]=1
+        _ms_opts=(-stdin)
     fi
 
     local _ms_orig_def=""
@@ -956,9 +958,9 @@ mock_spy() {
 
         eval "$_ms_new_def" || return 1
         export -f "${_ms_hidden_name?}"
-        mock "$_ms_cmd" "*" "$_ms_hidden_name \"\$@\""
+        mock "${_ms_opts[@]}" -- "$_ms_cmd" "*" "$_ms_hidden_name \"\$@\""
     else
-        mock "$_ms_cmd" "*" "command -- ${_ms_cmd} \"\$@\""
+        mock "${_ms_opts[@]}" -- "$_ms_cmd" "*" "command -- ${_ms_cmd} \"\$@\""
     fi
 }
 
@@ -986,8 +988,10 @@ mock_sequence() {
     mock::internal::validate_name "$_seq_cmd" || return 1
     mock::internal::validate_pattern "$_seq_pat" || return 1
     mock::internal::require_session || return 1
+    # mock sets the capture flag and rebuilds a wrapper that already exists.
+    local -a _seq_opts=()
     if (( _seq_stdin == 1 )); then
-        _BATS_MOCK_CAPTURE["$_seq_cmd"]=1
+        _seq_opts=(-stdin)
     fi
     shift 2
     local _seq_actions=("$@")
@@ -1043,7 +1047,7 @@ mock_sequence() {
     _seq_script+="*) $_seq_last_action ;; "
     _seq_script+=$'esac'
 
-    mock "$_seq_cmd" "$_seq_pat" "$_seq_script"
+    mock "${_seq_opts[@]}" -- "$_seq_cmd" "$_seq_pat" "$_seq_script"
 }
 
 #######################################
