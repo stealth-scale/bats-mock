@@ -73,22 +73,24 @@ declare -gA _BATS_MOCK_CAPTURE=()
 # ==============================================================================
 
 #######################################
-# Acquires an atomic lock for a specific directory.
-# Uses mkdir atomicity to prevent race conditions. The five-second deadline
-# includes command execution and scheduling time, not just time spent sleeping.
+# Acquires an atomic lock for a path.
+# Bash opens the lock file with O_EXCL when noclobber is set. Only one caller
+# can then create it. Each attempt runs in bash itself and calls no external
+# command. The five-second deadline includes command execution and scheduling
+# time, not just time spent sleeping.
 #
 # Arguments:
-#    $1 (String) - _lock_dir_path: The directory path to lock (suffix .lock will be appended).
+#    $1 (String) - The path to lock. The lock file is $1.lock.
 # Returns:
 #    0 - If lock acquired successfully.
 #    1 - If lock acquisition times out.
 #######################################
 mock::sync::lock() {
-    local _lock_dir_path="$1.lock"
+    local _lock_file="$1.lock"
     local _lock_deadline=$((SECONDS + 5))
     local -i _lock_tries=0
 
-    while ! command mkdir -- "$_lock_dir_path" 2>/dev/null; do
+    while ! (set -C; : > "$_lock_file") 2>/dev/null; do
         if (( SECONDS >= _lock_deadline )); then
             echo "MOCK TIMEOUT: Could not acquire lock for $1" >&2
             return 1
@@ -103,11 +105,11 @@ mock::sync::lock() {
 # Releases the atomic lock.
 #
 # Arguments:
-#    $1 (String) - _unlock_dir: The directory path to unlock.
+#    $1 (String) - The path to unlock. The lock file is $1.lock.
 #######################################
 mock::internal::unlock() {
-    local _unlock_dir="$1.lock"
-    command rmdir "$_unlock_dir" 2>/dev/null || true
+    local _unlock_file="$1.lock"
+    command rm -f -- "$_unlock_file" 2>/dev/null || true
 }
 
 #######################################
@@ -446,10 +448,11 @@ mock::jit::compile() {
 
         # Reserve a per-command index and publish invocation order under one lock.
         # Release it before running user code, including nested mocks.
+        # Bash creates the lock file with noclobber, as mock::sync::lock does.
         local _mock_history_lock=\"\$_mock_state_dir/history.lock\"
         local _mock_history_deadline=\$((SECONDS + 5))
         local -i _mock_history_tries=0
-        while ! command mkdir -- \"\$_mock_history_lock\" 2>/dev/null; do
+        while ! (set -C; : > \"\$_mock_history_lock\") 2>/dev/null; do
             if (( SECONDS >= _mock_history_deadline )); then
                 builtin printf 'MOCK TIMEOUT: Could not acquire call history lock\\n' >&2
                 return 1
@@ -460,7 +463,7 @@ mock::jit::compile() {
         local _mock_call_index
         if ! IFS= read -r _mock_call_index < \"\$_mock_state_dir/${_jit_cmd}.next\" ||
            [[ ! \$_mock_call_index =~ ^[0-9]+$ || \${#_mock_call_index} -gt 15 ]]; then
-            command rmdir -- \"\$_mock_history_lock\"
+            command rm -- \"\$_mock_history_lock\"
             builtin printf 'MOCK ERROR: Invalid call counter\\n' >&2
             return 1
         fi
@@ -471,9 +474,9 @@ mock::jit::compile() {
            builtin printf '%s\\n' \"\$((10#\$_mock_call_index + 1))\" > \"\$_mock_state_dir/${_jit_cmd}.next\" &&
            builtin printf \"[%s] %s %s\n\" \"\$timestamp\" \"\$cmd_name\" \"\$serialized_args\" >> \"\$_mock_global_log\" &&
            builtin printf \"%s\n\" \"\$log_safe_args\" >> \"\$_mock_state_dir/${_jit_cmd}.log\"; then
-            command rmdir -- \"\$_mock_history_lock\" || return 1
+            command rm -- \"\$_mock_history_lock\" || return 1
         else
-            command rmdir -- \"\$_mock_history_lock\" 2>/dev/null || :
+            command rm -f -- \"\$_mock_history_lock\" 2>/dev/null || :
             return 1
         fi
     "
@@ -527,7 +530,7 @@ mock::jit::compile() {
         local stdin_lock=\"\$_mock_state_dir/${_jit_cmd}.stdin.log.lock\"
         local _mock_stdin_deadline=\$((SECONDS + 5))
         local -i _mock_stdin_tries=0
-        while ! command mkdir -- \"\$stdin_lock\" 2>/dev/null; do
+        while ! (set -C; : > \"\$stdin_lock\") 2>/dev/null; do
              if (( SECONDS >= _mock_stdin_deadline )); then
                  builtin printf 'MOCK TIMEOUT: Could not acquire stdin log lock for %s\\n' \"\$cmd_name\" >&2
                  [[ -z \"\${stdin_tmp:-}\" ]] || command rm -f -- \"\$stdin_tmp\"
@@ -556,7 +559,7 @@ mock::jit::compile() {
         fi
         builtin printf '%s\\n' \"\$_mock_stdin_state\" > \"\$_mock_call_dir/capture\" || log_status=\$?
         builtin printf '%s\\n' \"\$return_code\" > \"\$_mock_call_dir/status\" || log_status=\$?
-        command rmdir -- \"\$stdin_lock\" || log_status=\$?"
+        command rm -- \"\$stdin_lock\" || log_status=\$?"
     else
         _jit_initial_state=disabled
         _jit_io_branch="            if [[ \"\$matched\" -eq 1 ]]; then
@@ -1007,13 +1010,13 @@ mock_sequence() {
     # Inline locking logic for subshell portability
     _seq_script+="
     local counter_file=$_seq_counter_quoted
-    local lock_dir=\"\${counter_file}.lock\"
+    local lock_file=\"\${counter_file}.lock\"
     local idx=0
 
     # 1. Acquire Lock
     local _mock_sequence_deadline=\$((SECONDS + 5))
     local _mock_sequence_tries=0
-    while ! command mkdir -- \"\$lock_dir\" 2>/dev/null; do
+    while ! (set -C; : > \"\$lock_file\") 2>/dev/null; do
         if (( SECONDS >= _mock_sequence_deadline )); then echo 'Lock timeout' >&2; return 1; fi
         ((_mock_sequence_tries+=1))
         if (( _mock_sequence_tries > 16 )); then command sleep 0.05; fi
@@ -1021,17 +1024,17 @@ mock_sequence() {
 
     # 2. Critical Section
     if ! IFS= read -r idx < \"\$counter_file\" || [[ ! \$idx =~ ^[0-9]+$ ]]; then
-        command rmdir -- \"\$lock_dir\" 2>/dev/null || true
+        command rm -f -- \"\$lock_file\" 2>/dev/null || true
         echo 'MOCK ERROR: Invalid sequence counter' >&2
         return 1
     fi
     if ! builtin printf '%s\n' \$((idx + 1)) > \"\$counter_file\"; then
-        command rmdir -- \"\$lock_dir\" 2>/dev/null || true
+        command rm -f -- \"\$lock_file\" 2>/dev/null || true
         return 1
     fi
 
     # 3. Release Lock
-    command rmdir -- \"\$lock_dir\" 2>/dev/null || true
+    command rm -f -- \"\$lock_file\" 2>/dev/null || true
 
     case \$idx in
     "

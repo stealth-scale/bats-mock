@@ -84,19 +84,38 @@ run_with_timeout() {
     ' _ "$seconds" "$@"
 }
 
-# Reproduce slow process/filesystem operations without changing the watchdog's
-# sleep. Fifty retries now take at least 20 seconds; a five-second deadline must
-# still expire within the 15-second safety watchdog.
+# Slows the retries on a lock without changing the watchdog's sleep. While the
+# lock file exists, every backoff sleep of less than a second takes 0.3
+# seconds. A hundred retries take at least 25 seconds. A five-second deadline
+# must still expire within the 15-second safety watchdog.
 slow_lock_attempts() {
     local lock_path="$1"
     local shim_dir="$BATS_TEST_TMPDIR/slow-lock-bin"
+    local sleep_bin
+    sleep_bin=$(type -P sleep)
+    mkdir -p "$shim_dir"
+    {
+        printf '#!/usr/bin/env bash\n'
+        # shellcheck disable=SC2016  # expanded when the shim runs
+        printf 'if [[ $1 == 0.* && -e %q ]]; then exec %q 0.3; fi\n' "$lock_path" "$sleep_bin"
+        printf 'exec %q "$@"\n' "$sleep_bin"
+    } > "$shim_dir/sleep"
+    chmod +x "$shim_dir/sleep"
+    export PATH="$shim_dir:$PATH"
+}
+
+# Puts a mkdir on PATH that exits 0 when its last operand is a directory that
+# exists. Ubuntu 26.04 installs uutils coreutils 0.10.0 by default. Its mkdir
+# exits 0 when a concurrent call creates the directory first.
+accept_existing_directories() {
+    local shim_dir="$BATS_TEST_TMPDIR/accepting-mkdir-bin"
     local mkdir_bin
     mkdir_bin=$(type -P mkdir)
     mkdir -p "$shim_dir"
     {
         printf '#!/usr/bin/env bash\n'
         # shellcheck disable=SC2016  # expanded when the shim runs
-        printf 'if [[ ${@: -1} == %q ]]; then command sleep 0.3; fi\n' "$lock_path"
+        printf 'if [[ -d ${@: -1} ]]; then exit 0; fi\n'
         printf 'exec %q "$@"\n' "$mkdir_bin"
     } > "$shim_dir/mkdir"
     chmod +x "$shim_dir/mkdir"
@@ -761,7 +780,7 @@ shadow_path_commands() {
     run probe
     [ "$status" -eq 1 ]
     [[ "$output" == *"Invalid sequence counter"* ]]
-    [ ! -d "${counters[0]}.lock" ]
+    [ ! -e "${counters[0]}.lock" ]
 }
 
 @test "sequence: missing actions -> rejects an empty sequence" {
@@ -1780,17 +1799,18 @@ shadow_path_commands() {
     local counter_files=( "${BATS_MOCK_STATE_DIR}/seq_locked_cmd_"* )
     local counter_file="${counter_files[0]}"
 
-    mkdir "${counter_file}.lock"
+    mock::sync::lock "$counter_file"
     slow_lock_attempts "${counter_file}.lock"
+    accept_existing_directories
 
     run_with_timeout 15 locked_cmd
 
     [ "$status" -eq 1 ]
     [[ "$output" == *"Lock timeout"* ]]
     [ "$(< "$counter_file")" = 0 ]
-    [ -d "${counter_file}.lock" ]
+    [ -e "${counter_file}.lock" ]
 
-    rmdir "${counter_file}.lock"
+    mock::internal::unlock "$counter_file"
     run locked_cmd
     [ "$status" -eq 0 ]
     [ "$output" = A ]
@@ -1798,15 +1818,16 @@ shadow_path_commands() {
 
 @test "error: history lock -> times out before executing an action" {
     mock probe '*' 'echo should-not-run'
-    mkdir "$BATS_MOCK_STATE_DIR/history.lock"
+    mock::sync::lock "$BATS_MOCK_STATE_DIR/history"
     slow_lock_attempts "$BATS_MOCK_STATE_DIR/history.lock"
+    accept_existing_directories
     run_with_timeout 15 probe
     [ "$status" -eq 1 ]
     [[ "$output" == *'call history lock'* ]]
     [[ "$output" != *should-not-run* ]]
     assert_called_times probe 0
-    [ -d "$BATS_MOCK_STATE_DIR/history.lock" ]
-    rmdir "$BATS_MOCK_STATE_DIR/history.lock"
+    [ -e "$BATS_MOCK_STATE_DIR/history.lock" ]
+    mock::internal::unlock "$BATS_MOCK_STATE_DIR/history"
     run probe
     [ "$status" -eq 0 ]
     [ "$output" = should-not-run ]
@@ -1815,8 +1836,9 @@ shadow_path_commands() {
 
 @test "error: sync lock -> timeout includes slow lock attempts" {
     local lock_path="$BATS_MOCK_STATE_DIR/manual"
-    mkdir "$lock_path.lock"
+    mock::sync::lock "$lock_path"
     slow_lock_attempts "$lock_path.lock"
+    accept_existing_directories
     # shellcheck disable=SC2016  # expanded in the child shell
     run_with_timeout 15 bash -c '
         source "$1"
@@ -1824,22 +1846,22 @@ shadow_path_commands() {
     ' _ "$BATS_TEST_DIRNAME/../load.bash" "$lock_path"
     [ "$status" -eq 1 ]
     [[ "$output" == *'MOCK TIMEOUT: Could not acquire lock'* ]]
-    [ -d "$lock_path.lock" ]
-    rmdir "$lock_path.lock"
-    mock::sync::lock "$lock_path"
-    [ -d "$lock_path.lock" ]
+    [ -e "$lock_path.lock" ]
     mock::internal::unlock "$lock_path"
-    [ ! -d "$lock_path.lock" ]
+    mock::sync::lock "$lock_path"
+    [ -e "$lock_path.lock" ]
+    mock::internal::unlock "$lock_path"
+    [ ! -e "$lock_path.lock" ]
 }
 
 @test "error: history lock -> retries until a competing caller releases it" {
     mock probe '*' 'echo acquired'
-    mkdir "$BATS_MOCK_STATE_DIR/history.lock"
+    mock::sync::lock "$BATS_MOCK_STATE_DIR/history"
     # shellcheck disable=SC2016  # expanded in the child shell
     run_with_timeout 15 bash -c '
         (
             sleep 0.5
-            rmdir "$BATS_MOCK_STATE_DIR/history.lock"
+            rm "$BATS_MOCK_STATE_DIR/history.lock"
         ) &
         release_pid=$!
         result=0
@@ -1850,7 +1872,7 @@ shadow_path_commands() {
     [ "$status" -eq 0 ]
     [ "$output" = acquired ]
     assert_called_times probe 1
-    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    [ ! -e "$BATS_MOCK_STATE_DIR/history.lock" ]
 }
 
 @test "error: call counter -> rejects malformed state and releases the history lock" {
@@ -1859,7 +1881,7 @@ shadow_path_commands() {
     run probe
     [ "$status" -eq 1 ]
     [[ "$output" == *'Invalid call counter'* ]]
-    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    [ ! -e "$BATS_MOCK_STATE_DIR/history.lock" ]
     printf '0\n' > "$BATS_MOCK_STATE_DIR/probe.next"
     probe
     assert_called_times probe 1
@@ -1872,7 +1894,7 @@ shadow_path_commands() {
     run probe value
     [ "$status" -eq 1 ]
     [[ "$output" == *'Invalid call counter'* ]]
-    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    [ ! -e "$BATS_MOCK_STATE_DIR/history.lock" ]
     [ ! -e "$BATS_TEST_TMPDIR/action" ]
     [ ! -s "$BATS_MOCK_STATE_DIR/probe.log" ]
     [ ! -s "$BATS_MOCK_GLOBAL_LOG" ]
@@ -1889,7 +1911,7 @@ shadow_path_commands() {
     printf keep > "$BATS_MOCK_STATE_DIR/probe.calls/0/marker"
     run probe value
     [ "$status" -eq 1 ]
-    [ ! -d "$BATS_MOCK_STATE_DIR/history.lock" ]
+    [ ! -e "$BATS_MOCK_STATE_DIR/history.lock" ]
     [ ! -e "$BATS_TEST_TMPDIR/action" ]
     [ ! -s "$BATS_MOCK_STATE_DIR/probe.log" ]
     [ ! -s "$BATS_MOCK_GLOBAL_LOG" ]
@@ -2540,15 +2562,16 @@ shadow_path_commands() {
 
 @test "spy: log lock -> times out and removes the capture file" {
     mock_spy -stdin head
-    mkdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+    mock::sync::lock "$BATS_MOCK_STATE_DIR/head.stdin.log"
     slow_lock_attempts "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+    accept_existing_directories
     run_with_timeout 15 bash -c 'head -n 1 </dev/null'
     [ "$status" -eq 1 ]
     [[ "$output" == *"MOCK TIMEOUT"* ]]
     local leftovers=( "$BATS_MOCK_STATE_DIR"/*.stdin.tmp.* )
     [ ! -e "${leftovers[0]}" ]
-    [ -d "$BATS_MOCK_STATE_DIR/head.stdin.log.lock" ]
-    rmdir "$BATS_MOCK_STATE_DIR/head.stdin.log.lock"
+    [ -e "$BATS_MOCK_STATE_DIR/head.stdin.log.lock" ]
+    mock::internal::unlock "$BATS_MOCK_STATE_DIR/head.stdin.log"
     run head -n 1 </dev/null
     [ "$status" -eq 0 ]
     assert_called_times head 2
