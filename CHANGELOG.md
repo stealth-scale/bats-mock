@@ -8,9 +8,16 @@ Every change a user would notice is recorded here. The format follows
 
 ### Fixed
 
-- The assertions, `mock_debug` and the failure reports call `wc`, `sed`, `awk` and `rmdir`
-  through `command`. A mock of one of these tools changed what an assertion reported: with
-  `wc` mocked, `assert_called_times` read the output of the mock as the call count.
+- The assertions, `mock_debug` and the failure reports call `wc`, `sed` and `awk` through
+  `command`. A mock of one of these tools changed what an assertion reported: with `wc`
+  mocked, `assert_called_times` read the output of the mock as the call count.
+- Concurrent calls acquire each lock one at a time on Ubuntu 26.04. A lock was a directory
+  that `mkdir` created. Ubuntu 26.04 installs uutils coreutils 0.10.0 by default. Its
+  `mkdir` exits 0 when a concurrent call creates the directory first. Concurrent calls
+  could then acquire the same lock. One of them failed with
+  `rmdir: failed to remove '.../history.lock'` or with `mkdir: ...: File exists`. Each lock
+  is now a file that bash creates with noclobber set. Bash opens that file with `O_EXCL`, so
+  only one call can create it.
 
 ## [1.2.1] - 2026-09-24
 
