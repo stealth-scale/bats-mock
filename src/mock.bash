@@ -107,7 +107,7 @@ mock::sync::lock() {
 #######################################
 mock::internal::unlock() {
     local _unlock_dir="$1.lock"
-    rmdir "$_unlock_dir" 2>/dev/null || true
+    command rmdir "$_unlock_dir" 2>/dev/null || true
 }
 
 #######################################
@@ -204,7 +204,7 @@ mock::report::fail() {
             _rep_content="(No calls recorded)"
         else
             # Number the lines for clearer history visibility using awk
-            _rep_content=$(echo "$_rep_log_content" | awk '{printf "%3d. %s\n", NR, $0}')
+            _rep_content=$(echo "$_rep_log_content" | command awk '{printf "%3d. %s\n", NR, $0}')
             _rep_content="${_rep_content%$'\n'}"
         fi
     fi
@@ -216,7 +216,7 @@ mock::report::fail() {
         if [[ "$_rep_log_content" == "<EMPTY LOG>" ]]; then
             _rep_content="(No stdin recorded)"
         else
-            _rep_content=$(echo "$_rep_log_content" | awk '{printf "%3d. %s\n", NR, $0}')
+            _rep_content=$(echo "$_rep_log_content" | command awk '{printf "%3d. %s\n", NR, $0}')
             _rep_content="${_rep_content%$'\n'}"
         fi
     fi
@@ -236,7 +236,7 @@ mock::report::fail() {
         _rep_body+="$_rep_label_str"
 
         local _rep_indented_content
-        _rep_indented_content=$(printf "%s" "$_rep_content" | sed 's/^/  /')
+        _rep_indented_content=$(printf "%s" "$_rep_content" | command sed 's/^/  /')
         _rep_body+=$'\n'"$_rep_indented_content"
     else
         local _rep_actual_str
@@ -1156,7 +1156,7 @@ refute_called() {
     local _rc_log="${BATS_MOCK_STATE_DIR}/${_rc_cmd}.log"
     if [[ -s "$_rc_log" ]]; then
         local _rc_count
-        _rc_count=$(wc -l < "$_rc_log")
+        _rc_count=$(command wc -l < "$_rc_log")
         mock::report::fail "$_rc_cmd" "Unexpected Call" "0 calls" "Actual" "${_rc_count// /} calls"
         return 1
     fi
@@ -1213,7 +1213,7 @@ assert_called_once_with() {
 
     local _acow_count=0
     if [[ -f "$_acow_log" ]]; then
-        _acow_count=$(wc -l < "$_acow_log")
+        _acow_count=$(command wc -l < "$_acow_log")
     fi
 
     if [[ "$_acow_count" -ne 1 ]]; then
@@ -1409,7 +1409,7 @@ assert_called_times() {
     local _act_log="${BATS_MOCK_STATE_DIR}/${_act_cmd}.log"
 
     if [[ -f "$_act_log" ]]; then
-        _act_count=$(wc -l < "$_act_log")
+        _act_count=$(command wc -l < "$_act_log")
     fi
 
     if [[ "${_act_count//[[:space:]]/}" != "$_act_expected" ]]; then
@@ -1635,7 +1635,7 @@ assert_call_sequence() {
     fi
 
     local _acs_actual_lines=()
-    mapfile -t _acs_actual_lines < <(sed -E 's/^\[[^]]+\] //' "$_acs_global_log")
+    mapfile -t _acs_actual_lines < <(command sed -E 's/^\[[^]]+\] //' "$_acs_global_log")
 
     local _acs_match_idx=0
     local _acs_total_expected=${#_acs_expected_sequence[@]}
@@ -1699,11 +1699,11 @@ mock::debug::details() {
 
     if [[ "$_mpd_show_history" == 1 ]]; then
         echo "     Calls:"
-        sed 's/^/       -> /' "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.log"
+        command sed 's/^/       -> /' "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.log"
         # Without capture the stdin log holds one empty line per call.
         if [[ "${BATS_MOCK_CAPTURE_STDIN:-0}" == 1 || -n "${_BATS_MOCK_CAPTURE[$_mpd_cmd]:-}" ]]; then
             echo "     Stdin:"
-            sed 's/^/       -> /' "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.stdin.log"
+            command sed 's/^/       -> /' "${BATS_MOCK_STATE_DIR}/${_mpd_cmd}.stdin.log"
         fi
     fi
     echo ""

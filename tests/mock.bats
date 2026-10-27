@@ -103,6 +103,32 @@ slow_lock_attempts() {
     export PATH="$shim_dir:$PATH"
 }
 
+# Defines a function for every command on PATH, as a mock does when it shadows a
+# command. Each function runs the real command. A call from a function of
+# mock.bash, a generated wrapper included, also appends the name of the command
+# to $BATS_TEST_TMPDIR/shadowed.
+shadow_path_commands() {
+    local name file
+    local -A skip=()
+    declare -gA shadow_library=()
+    shopt -s extdebug
+    while read -r _ _ name; do
+        read -r _ _ file < <(declare -F "$name")
+        # shellcheck disable=SC2034  # read by the functions that the eval below defines
+        [[ "$file" != */src/mock.bash ]] || shadow_library["x$name"]=1
+    done < <(declare -F)
+    shopt -u extdebug
+    while IFS= read -r name; do skip["x$name"]=1; done < <(compgen -b; compgen -k; compgen -A function; compgen -a)
+    while IFS= read -r name; do
+        [[ -z "${skip["x$name"]-}" && "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+-]*$ ]] || continue
+        skip["x$name"]=1
+        eval "$name() {
+            [[ -z \"\${shadow_library[x\${FUNCNAME[1]-}]-}\" ]] || builtin printf '%s\n' '$name' >> \"\$BATS_TEST_TMPDIR/shadowed\"
+            command $name \"\$@\"
+        }"
+    done < <(compgen -c)
+}
+
 # ==============================================================================
 # GROUP 01: CORE MOCK LIFECYCLE
 # ==============================================================================
@@ -1267,6 +1293,39 @@ slow_lock_attempts() {
     [[ "$output" != *entry-11* ]]
     [[ "$output" != *entry-12* ]]
     [[ "$output" == *'and 2 more calls'* ]]
+}
+
+@test "feedback: commands on PATH shadowed by functions -> assertions and reports call the real tools" {
+    mock deploy '*' true
+    mock idle '*' true
+    mock -stdin probe '*' 'command cat >/dev/null'
+    deploy v1
+    printf 'payload' | probe
+    shadow_path_commands
+
+    assert_called deploy
+    refute_called idle
+    assert_called_times deploy 1
+    assert_called_once_with deploy v1
+    assert_call_sequence deploy probe
+    mock::sync::lock "$BATS_TEST_TMPDIR/lock"
+    mock::internal::unlock "$BATS_TEST_TMPDIR/lock"
+    [ ! -e "$BATS_TEST_TMPDIR/lock.lock" ]
+
+    run refute_called deploy
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Actual     : 1 calls'* ]]
+    run assert_called_with deploy v2
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'    1. v1'* ]]
+    run assert_stdin_equals probe other
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'    1. payload'* ]]
+    run mock_debug 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'       -> v1'* ]]
+    [[ "$output" == *$'     Stdin:\n       -> payload'* ]]
+    [[ ! -e "$BATS_TEST_TMPDIR/shadowed" ]] || { printf 'called as functions: %s\n' "$(< "$BATS_TEST_TMPDIR/shadowed")"; false; }
 }
 
 @test "debug: mock_debug -> runs without error" {
