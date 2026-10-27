@@ -6,6 +6,12 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The assertions, `mock_debug` and the failure reports call `wc`, `sed`, `awk` and `rmdir`
+  through `command`. A mock of one of these tools changed what an assertion reported: with
+  `wc` mocked, `assert_called_times` read the output of the mock as the call count.
+
 ## [1.2.1] - 2026-09-24
 
 ### Fixed
