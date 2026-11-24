@@ -621,9 +621,10 @@ ${_jit_post_block}
 
     eval "$_jit_func_body" || return 1
     export -f "${_jit_action_func?}"
-    if [[ "$_jit_cmd" =~ ^[a-zA-Z0-9_]+$ ]]; then
-        export -f "${_jit_cmd?}"
-    fi
+    # A child Bash process imports every name that mock::internal::validate_name
+    # accepts. A process that starts in POSIX mode imports only identifiers and
+    # reports an error for each other name.
+    export -f -- "${_jit_cmd?}"
 
     printf -v "$_jit_dirty_var" "0"
     printf -v "$_jit_built_var" "1"

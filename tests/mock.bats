@@ -716,6 +716,13 @@ shadow_path_commands() {
     [ "$output" = original ]
 }
 
+@test "unmock: child shell -> removes the export of a name with a hyphen" {
+    mock probe-cli '*' 'echo mocked'
+    unmock probe-cli
+    run -127 bash -c 'probe-cli'
+    [[ "$output" == *'probe-cli: command not found'* ]]
+}
+
 # ==============================================================================
 # GROUP 07: SEQUENCES & CONCURRENCY
 # ==============================================================================
@@ -1489,6 +1496,26 @@ shadow_path_commands() {
     run a:b; [ "$output" = colon ]
     unmock a-b
     run a_b; [ "$output" = underscore ]
+}
+
+@test "system: naming -> a child shell calls mocks with a hyphen, a colon or a dot in the name" {
+    mock probe-cli '*' 'echo hyphen'
+    mock probe::cli '*' 'echo colon'
+    mock probe.cli '*' 'echo dot'
+    run bash -c 'probe-cli first && probe::cli second && probe.cli third'
+    [ "$status" -eq 0 ]
+    [ "$output" = $'hyphen\ncolon\ndot' ]
+    assert_called_with_args probe-cli first
+    assert_called_with_args probe::cli second
+    assert_called_with_args probe.cli third
+}
+
+@test "system: naming -> a child shell calls a mock whose name starts with a hyphen" {
+    mock -- -probe '*' 'echo leading'
+    run bash -c -- '-probe value'
+    [ "$status" -eq 0 ]
+    [ "$output" = leading ]
+    assert_called_with_args -probe value
 }
 
 @test "system: loading -> sourcing the library twice is harmless" {
