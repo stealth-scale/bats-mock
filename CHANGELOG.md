@@ -6,6 +6,8 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-24
+
 ### Changed
 
 - `mock` exports a mock whose name contains `-`, `:` or `.` too. A child Bash process that
@@ -147,7 +149,8 @@ Compatibility changes for users of earlier untagged revisions:
 - Lock timeouts account for command execution and scheduling overhead, including on macOS;
   stdin-log timeouts remove the temporary capture file.
 
-[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.2.1...main
+[Unreleased]: https://github.com/stealth-scale/bats-mock/compare/v1.3.0...main
+[1.3.0]: https://github.com/stealth-scale/bats-mock/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/stealth-scale/bats-mock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/stealth-scale/bats-mock/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/stealth-scale/bats-mock/compare/v1.0.1...v1.1.0
