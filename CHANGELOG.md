@@ -6,6 +6,15 @@ Every change a user would notice is recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `mock` exports a mock whose name contains `-`, `:` or `.` too. A child Bash process that
+  the code under test starts then calls a mock of `rc-update`, `pkg::install` or
+  `mkfs.ext4` instead of the real command. Earlier releases exported only mocks whose names
+  consist of letters, digits and underscores. A Bash process that starts with `--posix` or
+  with `POSIXLY_CORRECT` set does not import such a mock. It prints
+  `error importing function definition` on stderr for each one.
+
 ### Fixed
 
 - The assertions, `mock_debug` and the failure reports call `wc`, `sed` and `awk` through

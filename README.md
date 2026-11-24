@@ -384,10 +384,12 @@ diagnostic logs.
 ## Boundaries to keep in mind
 
 - **Function lookup is the interception boundary.** `command ssh`, `/usr/bin/ssh` and
-  programs that launch their own executables bypass a function mock. Simple alphanumeric
-  and underscore names are exported to child Bash processes that import functions;
-  names containing `:`, `.` or `-` are not exported. They still work in the current shell
-  and Bats `run` subshells. Defining a function after mocking it replaces the mock.
+  programs that launch their own executables bypass a function mock. Every mock is
+  exported. A child Bash process calls a mock under any name that `mock` accepts. A Bash
+  process that starts with `--posix` or with `POSIXLY_CORRECT` set does not import a mock
+  whose name contains `.`, `:` or `-` or starts with a digit. It prints
+  `error importing function definition` on stderr for each such mock. Defining a function
+  after mocking it replaces the mock.
 - **Pattern rules and joined-text assertions do not distinguish argument boundaries.**
   `tool "a b"` and `tool a b` both match the same joined text. This also applies to the
   existing `assert_called_exact` API. Use `assert_called_with_args` when boundaries matter.
